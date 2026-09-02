@@ -1,8 +1,0 @@
-import os
-
-# Define project path inside your Drive
-project_dir = '/content/drive/MyDrive/NOAA_Wave_Analysis'
-os.makedirs(project_dir, exist_ok=True)
-
-# Change the current working directory to your project folder
-%cd {project_dir}
