@@ -140,7 +140,7 @@ async function fetchNDBCFile(stationId, ext) {
   const targetUrl = `https://www.ndbc.noaa.gov/data/realtime2/${stationId}.${ext}`;
   
   // Paste your actual Cloudflare Worker URL here:
-  const WORKER_URL = "https://noaa-wave-proxy.<your-subdomain>.workers.dev";
+  const WORKER_URL = "https://noaa-wave-proxy.rwnster.workers.dev";
 
   const proxyUrl = `${WORKER_URL}?url=${encodeURIComponent(targetUrl)}`;
 
