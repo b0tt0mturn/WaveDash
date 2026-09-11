@@ -2,74 +2,429 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Wave Dashboard</title>
+  <title>Wave Dash - Live Interactive Spectral Analysis</title>
+  
+  <!-- Leaflet CSS & JS for Interactive Map -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  
+  <!-- Plotly.js for Dynamic Vector Charts -->
+  <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+
   <style>
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
+    body { font-family: Arial, sans-serif; margin: 0; padding: 15px; background: #f4f6f8; }
+    h2 { margin-top: 0; color: #1a252f; }
+    .grid-container { display: grid; grid-template-columns: 320px 1fr; gap: 15px; }
+    .panel { background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+    #map { height: 250px; width: 100%; border-radius: 6px; margin-bottom: 10px; }
+    .control-group { margin-bottom: 10px; }
+    .control-group label { display: block; font-size: 12px; font-weight: bold; margin-bottom: 3px; }
+    .control-group input, .control-group select { width: 100%; padding: 5px; box-sizing: border-box; }
+    .btn { background: #007bff; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; width: 100%; margin-top: 5px;}
+    .btn:hover { background: #0056b3; }
+    .status-msg { font-size: 11px; color: #6c757d; margin-top: 5px; font-style: italic; }
+    
+    /* Player Controls */
+    .player-controls { display: flex; gap: 5px; align-items: center; justify-content: center; margin-bottom: 10px; }
+    .player-btn { padding: 6px 12px; font-weight: bold; cursor: pointer; background: #e9ecef; border: 1px solid #ced4da; border-radius: 4px; }
+    .player-btn:hover { background: #dee2e6; }
+    .slider-container { display: flex; align-items: center; gap: 10px; margin-top: 5px; }
+    .slider-container input { flex-grow: 1; }
 
-    body {
-      background-color: #0d1117; /* GitHub dark mode background */
-      color: #f0f6fc;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
-      padding: 16px;
-    }
-
-    .card {
-      background-color: #161b22;
-      border: 1px solid #30363d;
-      border-radius: 12px;
-      padding: 16px;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-      max-width: 100%;
-      text-align: center;
-    }
-
-    h1 {
-      font-size: 1.25rem;
-      margin-bottom: 12px;
-      color: #58a6ff;
-    }
-
-    .gif-container {
-      width: 100%;
-      overflow: hidden;
-      border-radius: 8px;
-    }
-
-    img {
-      width: 100%;
-      height: auto;
-      display: block;
-      border-radius: 8px;
-    }
-
-    .status {
-      margin-top: 12px;
-      font-size: 0.85rem;
-      color: #8b949e;
-    }
+    /* Plot Layout */
+    .plots-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .full-width { grid-column: span 2; }
+    .plot-box { height: 360px; }
   </style>
 </head>
 <body>
 
-  <div class="card">
-    <h1>Wave Dash</h1>
-    
-    <div class="gif-container">
-      <img src="spectral_analysis_animation.gif" alt="Recent Ocean Wave Data Animation">
+  <h2>🌊 Wave Dash - Ocean Wave Spectral Dashboard</h2>
+
+  <div class="grid-container">
+    <!-- Left Sidebar: Map & Parameter Controls -->
+    <div class="panel">
+      <label><b>Select Wave Buoy:</b></label>
+      <div id="map"></div>
+
+      <div class="control-group">
+        <label>Station ID:</label>
+        <input type="text" id="stationId" value="41159">
+      </div>
+      
+      <div class="control-group">
+        <label>Hours to Plot:</label>
+        <input type="number" id="hoursToPlot" value="12" min="1" max="24">
+      </div>
+
+      <hr>
+      <label><b>Spectral Analysis Thresholds</b></label>
+      
+      <div class="control-group" style="margin-top: 5px;">
+        <label>Critical Angle (°):</label>
+        <input type="number" id="critAngle" value="120">
+      </div>
+
+      <div class="control-group">
+        <label>Critical Period (s):</label>
+        <input type="number" id="critPeriod" value="9">
+      </div>
+
+      <div class="control-group">
+        <label>Peak Threshold (m²/Hz):</label>
+        <input type="number" step="0.05" id="peakThreshold" value="0.1">
+      </div>
+
+      <button class="btn" id="fetchBtn" onclick="fetchAndProcessData()">Update Analysis</button>
+      <div id="statusMsg" class="status-msg">Ready.</div>
     </div>
 
-    <p class="status">Live Wave Data Animation</p>
+    <!-- Right Area: Interactive Plots & Timeline Player -->
+    <div class="panel">
+      <!-- Media Player Bar -->
+      <div class="player-controls">
+        <button class="player-btn" onclick="firstFrame()">⏮ First</button>
+        <button class="player-btn" onclick="stepFrame(-1)">◀ Rev</button>
+        <button class="player-btn" id="playBtn" onclick="togglePlay()">▶ Play</button>
+        <button class="player-btn" onclick="stepFrame(1)">Next ▶</button>
+        <button class="player-btn" onclick="lastFrame()">Last ⏭</button>
+      </div>
+
+      <div class="slider-container">
+        <span id="timestampDisplay" style="font-weight: bold; min-width: 150px;">Loading...</span>
+        <input type="range" id="timeSlider" min="0" max="0" value="0" oninput="onSliderMove(this.value)">
+      </div>
+
+      <!-- Live Plots -->
+      <div class="plots-grid" style="margin-top: 15px;">
+        <div id="polarPlot" class="plot-box"></div>
+        <div id="spectralPlot" class="plot-box"></div>
+        <div id="heatmapPlot" class="plot-box full-width"></div>
+      </div>
+    </div>
   </div>
 
+  <script>
+    // --- Global Application State ---
+    let timeSeriesData = [];
+    let currentFrameIdx = 0;
+    let isPlaying = false;
+    let playInterval = null;
+
+    // --- Helper Delay for Rate Limiting ---
+    const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+    // --- Interactive Map Setup ---
+    const map = L.map('map').setView([28.5, -80.0], 6);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap'
+    }).addTo(map);
+
+    // Preset NDBC Buoy Markers
+    const buoys = [
+      { id: "41159", name: "41159 - Cape Canaveral Nearshore", lat: 28.46, lon: -80.53 },
+      { id: "41009", name: "41009 - CANAVERAL 20 NM East", lat: 28.51, lon: -80.18 },
+      { id: "41010", name: "41010 - CANAVERAL 120 NM East", lat: 28.88, lon: -78.48 }
+    ];
+
+    buoys.forEach(b => {
+      const marker = L.marker([b.lat, b.lon]).addTo(map);
+      marker.bindPopup(`<b>Station ${b.id}</b><br>${b.name}`);
+      marker.on('click', () => {
+        document.getElementById('stationId').value = b.id;
+        fetchAndProcessData();
+      });
+    });
+
+    // --- NDBC Data Fetching & Parsing (Throttled Single-Proxy) ---
+    async function fetchNDBCFile(stationId, ext) {
+      const targetUrl = `https://www.ndbc.noaa.gov/data/realtime2/${stationId}.${ext}`;
+      
+      // Secondary fallback proxies in case primary fails
+      const proxies = [
+        `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`,
+        `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`
+      ];
+
+      for (const proxyUrl of proxies) {
+        try {
+          const response = await fetch(proxyUrl);
+          if (response.ok) {
+            const text = await response.text();
+            if (text && text.trim().length > 0 && !text.includes("403 Forbidden")) {
+              return parseNDBCFormat(text);
+            }
+          }
+        } catch (err) {
+          // Fall through to next proxy
+        }
+      }
+
+      throw new Error(`Failed to fetch .${ext}. NOAA or proxy may be throttling queries.`);
+    }
+
+    function parseNDBCFormat(text) {
+      const lines = text.trim().split('\n');
+      const timestamps = [];
+      let frequencies = [];
+      const matrices = [];
+
+      for (let line of lines) {
+        line = line.trim();
+        if (line.startsWith('#') || !line) continue;
+
+        const parts = line.split(/\s+/);
+        if (parts.length < 6) continue;
+
+        // Parse key-value pairs e.g., "0.05 (0.00)"
+        const matches = [...line.matchAll(/([-+]?\d+(?:\.\d+)?)\s+\(([-+]?\d+(?:\.\d+)?)\)/g)];
+        if (matches.length === 0) continue;
+
+        if (frequencies.length === 0) {
+          frequencies = matches.map(m => parseFloat(m[2]));
+        }
+
+        const dateStr = `${parts[0]}-${parts[1].padStart(2,'0')}-${parts[2].padStart(2,'0')} ${parts[3].padStart(2,'0')}:${parts[4].padStart(2,'0')} UTC`;
+        timestamps.push(dateStr);
+        matrices.push(matches.map(m => parseFloat(m[1])));
+      }
+      return { timestamps, frequencies, matrices };
+    }
+
+    // --- Main Data Pipeline (Sequential + Throttled) ---
+    async function fetchAndProcessData() {
+      pause();
+      const status = document.getElementById('statusMsg');
+      const stationId = document.getElementById('stationId').value;
+      const hoursToPlot = parseInt(document.getElementById('hoursToPlot').value);
+
+      try {
+        status.innerText = "Fetching spectrum file...";
+        const spec = await fetchNDBCFile(stationId, 'data_spec');
+        
+        // Pause 600ms between requests to respect rate-limits
+        await delay(600);
+        status.innerText = "Fetching mean wave directions...";
+        const alpha1 = await fetchNDBCFile(stationId, 'swdir');
+        
+        await delay(600);
+        status.innerText = "Fetching principal wave directions...";
+        const alpha2 = await fetchNDBCFile(stationId, 'swdir2');
+
+        status.innerText = "Processing spectral matrices...";
+
+        // Process up to requested hours
+        const framesCount = Math.min(hoursToPlot, spec.timestamps.length);
+        timeSeriesData = [];
+
+        for (let i = framesCount - 1; i >= 0; i--) {
+          timeSeriesData.push({
+            timestamp: spec.timestamps[i],
+            frequencies: spec.frequencies,
+            energy: spec.matrices[i],
+            alpha1: alpha1.matrices[i],
+            alpha2: alpha2.matrices[i]
+          });
+        }
+
+        // Configure Player Slider
+        const slider = document.getElementById('timeSlider');
+        slider.max = timeSeriesData.length - 1;
+        slider.value = timeSeriesData.length - 1;
+        currentFrameIdx = timeSeriesData.length - 1;
+
+        renderHeatmap();
+        renderCurrentFrame();
+        status.innerText = "Updated successfully.";
+
+      } catch (err) {
+        status.innerText = "Fetch error.";
+        alert("Error fetching or parsing buoy data: " + err.message);
+      }
+    }
+
+    // --- Peak Detection Logic ---
+    function analyzeFrame(frame) {
+      const minFreq = 0.05, maxFreq = 0.20;
+      const peakThresh = parseFloat(document.getElementById('peakThreshold').value);
+      
+      const freqs = frame.frequencies;
+      const periods = freqs.map(f => 1 / f);
+      const E = frame.energy;
+      const D1 = frame.alpha1;
+
+      const clusters = [];
+      for (let i = 1; i < freqs.length - 1; i++) {
+        if (freqs[i] >= minFreq && freqs[i] <= maxFreq) {
+          if (E[i] >= E[i-1] && E[i] >= E[i+1] && E[i] >= peakThresh) {
+            clusters.push({
+              period: periods[i],
+              energy: E[i],
+              direction: D1[i]
+            });
+          }
+        }
+      }
+      return clusters.sort((a,b) => b.energy - a.energy).slice(0, 4);
+    }
+
+    // --- Plotting Engine ---
+    function renderCurrentFrame() {
+      if (!timeSeriesData.length) return;
+
+      const frame = timeSeriesData[currentFrameIdx];
+      document.getElementById('timestampDisplay').innerText = frame.timestamp;
+
+      const periods = frame.frequencies.map(f => 1 / f);
+      const clusters = analyzeFrame(frame);
+
+      // 1. Polar Plot
+      const critAngle = parseFloat(document.getElementById('critAngle').value);
+      const critPeriod = parseFloat(document.getElementById('critPeriod').value);
+
+      const polarData = [
+        {
+          type: 'scatterpolar',
+          mode: 'markers+text',
+          r: clusters.map(c => c.period),
+          theta: clusters.map(c => c.direction),
+          text: clusters.map((c, i) => `Swell ${i+1}`),
+          textposition: 'top right',
+          marker: {
+            size: clusters.map(c => Math.max(c.energy * 25, 12)),
+            color: clusters.map(c => c.energy),
+            colorscale: 'Jet',
+            showscale: false
+          }
+        }
+      ];
+
+      const polarLayout = {
+        title: { text: `Peak Swells (Polar)`, font: { size: 14 } },
+        polar: {
+          angularaxis: { direction: "clockwise", rotation: 90 },
+          radialaxis: { range: [0, 18] }
+        },
+        margin: { t: 40, b: 20, l: 30, r: 30 }
+      };
+
+      Plotly.newPlot('polarPlot', polarData, polarLayout);
+
+      // 2. Spectral Density Line Plot
+      const spectralData = [
+        {
+          x: periods,
+          y: frame.energy,
+          type: 'scatter',
+          mode: 'lines',
+          name: 'Energy Density',
+          line: { color: 'blue' }
+        }
+      ];
+
+      const spectralLayout = {
+        title: { text: `Energy Density vs Period`, font: { size: 14 } },
+        xaxis: { title: 'Period (s)', range: [0, 18] },
+        yaxis: { title: 'Energy (m²/Hz)' },
+        margin: { t: 40, b: 40, l: 40, r: 20 },
+        shapes: [
+          { type: 'line', x0: critPeriod, x1: critPeriod, y0: 0, y1: Math.max(...frame.energy), line: { color: 'blue', dash: 'dash' } }
+        ]
+      };
+
+      Plotly.newPlot('spectralPlot', spectralData, spectralLayout);
+    }
+
+    function renderHeatmap() {
+      const zValues = [];
+      const yValues = timeSeriesData[0].frequencies.map(f => 1 / f);
+      const xValues = timeSeriesData.map((_, idx) => `Hr ${idx}`);
+
+      // Matrix transpose for heatmap
+      for (let j = 0; j < yValues.length; j++) {
+        const row = [];
+        for (let i = 0; i < timeSeriesData.length; i++) {
+          row.push(timeSeriesData[i].energy[j]);
+        }
+        zValues.push(row);
+      }
+
+      const heatmapData = [{
+        z: zValues,
+        x: xValues,
+        y: yValues,
+        type: 'heatmap',
+        colorscale: 'Jet'
+      }];
+
+      const heatmapLayout = {
+        title: { text: `Spectral Density Heatmap Over Time`, font: { size: 14 } },
+        xaxis: { title: 'Timeline Index' },
+        yaxis: { title: 'Period (s)', range: [0, 18] },
+        margin: { t: 40, b: 40, l: 40, r: 20 }
+      };
+
+      Plotly.newPlot('heatmapPlot', heatmapData, heatmapLayout);
+    }
+
+    // --- Media Controls Engine ---
+    function togglePlay() {
+      if (isPlaying) {
+        pause();
+      } else {
+        play();
+      }
+    }
+
+    function play() {
+      isPlaying = true;
+      document.getElementById('playBtn').innerText = "⏸ Pause";
+      playInterval = setInterval(() => {
+        if (currentFrameIdx >= timeSeriesData.length - 1) {
+          currentFrameIdx = 0; // Loop back
+        } else {
+          currentFrameIdx++;
+        }
+        document.getElementById('timeSlider').value = currentFrameIdx;
+        renderCurrentFrame();
+      }, 1000);
+    }
+
+    function pause() {
+      isPlaying = false;
+      document.getElementById('playBtn').innerText = "▶ Play";
+      if (playInterval) clearInterval(playInterval);
+    }
+
+    function stepFrame(dir) {
+      pause();
+      currentFrameIdx = Math.max(0, Math.min(timeSeriesData.length - 1, currentFrameIdx + dir));
+      document.getElementById('timeSlider').value = currentFrameIdx;
+      renderCurrentFrame();
+    }
+
+    function firstFrame() {
+      pause();
+      currentFrameIdx = 0;
+      document.getElementById('timeSlider').value = currentFrameIdx;
+      renderCurrentFrame();
+    }
+
+    function lastFrame() {
+      pause();
+      currentFrameIdx = timeSeriesData.length - 1;
+      document.getElementById('timeSlider').value = currentFrameIdx;
+      renderCurrentFrame();
+    }
+
+    function onSliderMove(val) {
+      pause();
+      currentFrameIdx = parseInt(val);
+      renderCurrentFrame();
+    }
+
+    // Initialize App on Load
+    window.onload = fetchAndProcessData;
+  </script>
 </body>
 </html>
