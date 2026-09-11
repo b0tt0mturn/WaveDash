@@ -136,18 +136,18 @@
     .slider-container { display: flex; flex-direction: column; gap: 5px; margin-top: 5px; }
     .slider-container input { width: 100%; }
 
-    /* Plot Layout */
+    /* Plot Layout (Reduced ~10% for mobile landscape fit and extra spacing) */
     .plots-grid { 
       display: flex; 
       flex-direction: column; 
-      gap: 15px; 
+      gap: 20px; 
     }
     .plot-box { 
-      height: 300px; 
+      height: 270px; 
       width: 100%;
     }
 
-    /* Desktop View Overrides */
+    /* Desktop View & Landscape Overrides */
     @media (min-width: 768px) {
       body { padding: 15px; }
       h2 { font-size: 1.5rem; text-align: left; }
@@ -156,7 +156,7 @@
         grid-template-columns: 1fr 1fr; 
       }
       .full-width { grid-column: span 2; }
-      .plot-box { height: 360px; }
+      .plot-box { height: 320px; }
       .slider-container { flex-direction: row; align-items: center; }
     }
   </style>
@@ -221,7 +221,7 @@
             </div>
 
             <div class="control-group span-full">
-              <label>Min Energy for Peak Detection (m²/Hz):</label>
+              <label>Peak Thresh (m²/Hz):</label>
               <input type="number" step="0.05" id="peakThreshold" value="0.1">
             </div>
 
@@ -260,20 +260,16 @@
   </div>
 
   <script>
-    // --- Global Application State ---
     let timeSeriesData = [];
     let currentFrameIdx = 0;
     let isPlaying = false;
     let playInterval = null;
     let mapMarkersGroup = null;
-    
-    // Dynamic Buoy Database (populated automatically via NOAA metadata feed)
     let dynamicBuoys = [];
 
-    // Set Default Start Date Input to Today & Current Hour (ISO string formatting)
     function setDefaultStartDate() {
       const now = new Date();
-      now.setMinutes(0, 0, 0); // Round down to current hour
+      now.setMinutes(0, 0, 0);
       const year = now.getFullYear();
       const month = String(now.getMonth() + 1).padStart(2, '0');
       const day = String(now.getDate()).padStart(2, '0');
@@ -283,10 +279,11 @@
       document.getElementById('startDate').value = formattedDateTime;
     }
 
-    // --- Interactive Map Setup ---
+    // Switched to CartoDB Voyager tiles to prevent OSM User-Agent blocking
     const map = L.map('map').setView([34.211, -76.944], 7);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '© OpenStreetMap'
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+      attribution: '© OpenStreetMap contributors © CARTO',
+      maxZoom: 19
     }).addTo(map);
 
     mapMarkersGroup = L.layerGroup().addTo(map);
@@ -302,87 +299,72 @@
       return R * c;
     }
 
-    // --- Dynamic Buoy Discovery Engine (NOAA Metadata Fetch) ---
     async function updateDynamicBuoyDatabase(activeStationId) {
       const WORKER_URL = "https://noaa-wave-proxy.rwnster.workers.dev";
       const targetUrl = "https://www.ndbc.noaa.gov/activestations.xml";
       const proxyUrl = `${WORKER_URL}?url=${encodeURIComponent(targetUrl)}`;
 
-      // Fetch master NOAA active stations XML feed
-      const response = await fetch(proxyUrl);
-      if (!response.ok) throw new Error("Could not fetch active NOAA stations database.");
-      
-      const xmlText = await response.text();
-      const parser = new DOMParser();
-      const xmlDoc = parser.parseFromString(xmlText, "text/xml");
-      const stationNodes = xmlDoc.getElementsByTagName("station");
-
-      let allWaveStations = [];
-      let targetBuoy = null;
-
-      // Filter: Only include stations with spectral wave data capabilities (pgm="wave", "spec", or wave="y")
-      for (let i = 0; i < stationNodes.length; i++) {
-        const node = stationNodes[i];
-        const id = node.getAttribute("id") ? node.getAttribute("id").toLowerCase() : "";
-        const lat = parseFloat(node.getAttribute("lat"));
-        const lon = parseFloat(node.getAttribute("lon"));
-        const name = node.getAttribute("name") || `Station ${id.toUpperCase()}`;
-        const pgm = node.getAttribute("pgm") || "";
-        const spec = node.getAttribute("spec") || "";
-        const wave = node.getAttribute("wave") || "";
-
-        // Check if station measures wave/spectral data to prevent breaking line plots
-        const hasWaveData = pgm.includes("wave") || spec.toLowerCase() === "y" || wave.toLowerCase() === "y";
-
-        if (!isNaN(lat) && !isNaN(lon)) {
-          const stationObj = { id: id.toUpperCase(), name: `${id.toUpperCase()} - ${name}`, lat, lon, hasWaveData };
-          if (hasWaveData) {
-            allWaveStations.push(stationObj);
-          }
-          if (id === activeStationId.toLowerCase()) {
-            targetBuoy = stationObj;
-          }
-        }
-      }
-
-      if (!targetBuoy) {
-        throw new Error(`Station ID ${activeStationId} not found in active NOAA database.`);
-      }
-
-      // Clear previous local buoy database and repopulate with buoys within 200 miles
-      dynamicBuoys = allWaveStations.filter(b => {
-        const dist = getDistanceMiles(targetBuoy.lat, targetBuoy.lon, b.lat, b.lon);
-        return dist <= 200;
-      });
-
-      // Render updated stations and 200-mile circle on Leavelet Map
       mapMarkersGroup.clearLayers();
 
-      dynamicBuoys.forEach(b => {
-        const dist = getDistanceMiles(targetBuoy.lat, targetBuoy.lon, b.lat, b.lon);
-        const isCurrent = b.id.toLowerCase() === activeStationId.toLowerCase();
+      try {
+        const response = await fetch(proxyUrl);
+        if (!response.ok) throw new Error("Could not fetch active NOAA stations database.");
         
-        const marker = L.marker([b.lat, b.lon]).addTo(mapMarkersGroup);
-        marker.bindPopup(`<b>Station ${b.id}</b><br>${b.name}<br>Distance: ${dist.toFixed(1)} miles`);
-        marker.on('click', () => {
-          document.getElementById('stationId').value = b.id;
-          fetchAndProcessData();
-        });
-      });
+        const xmlText = await response.text();
+        const parser = new DOMParser();
+        const xmlDoc = parser.parseFromString(xmlText, "text/xml");
+        const stationNodes = xmlDoc.getElementsByTagName("station");
 
-      // Draw 200-mile radius ring around entered station
-      L.circle([targetBuoy.lat, targetBuoy.lon], {
-        radius: 200 * 1609.34, // 200 miles in meters
-        color: '#007bff',
-        fillColor: '#007bff',
-        fillOpacity: 0.08,
-        weight: 1.5
-      }).addTo(mapMarkersGroup);
+        let allWaveStations = [];
+        let targetBuoy = null;
 
-      map.setView([targetBuoy.lat, targetBuoy.lon], 7);
+        for (let i = 0; i < stationNodes.length; i++) {
+          const node = stationNodes[i];
+          const id = node.getAttribute("id") ? node.getAttribute("id").toLowerCase() : "";
+          const lat = parseFloat(node.getAttribute("lat"));
+          const lon = parseFloat(node.getAttribute("lon"));
+          const name = node.getAttribute("name") || `Station ${id.toUpperCase()}`;
+          const pgm = node.getAttribute("pgm") || "";
+          const spec = node.getAttribute("spec") || "";
+          const wave = node.getAttribute("wave") || "";
+
+          const hasWaveData = pgm.includes("wave") || spec.toLowerCase() === "y" || wave.toLowerCase() === "y";
+
+          if (!isNaN(lat) && !isNaN(lon)) {
+            const stationObj = { id: id.toUpperCase(), name: `${id.toUpperCase()} - ${name}`, lat, lon, hasWaveData };
+            if (hasWaveData) allWaveStations.push(stationObj);
+            if (id === activeStationId.toLowerCase()) targetBuoy = stationObj;
+          }
+        }
+
+        if (targetBuoy) {
+          dynamicBuoys = allWaveStations.filter(b => getDistanceMiles(targetBuoy.lat, targetBuoy.lon, b.lat, b.lon) <= 200);
+
+          dynamicBuoys.forEach(b => {
+            const dist = getDistanceMiles(targetBuoy.lat, targetBuoy.lon, b.lat, b.lon);
+            const marker = L.marker([b.lat, b.lon]).addTo(mapMarkersGroup);
+            marker.bindPopup(`<b>Station ${b.id}</b><br>${b.name}<br>Distance: ${dist.toFixed(1)} miles`);
+            marker.on('click', () => {
+              document.getElementById('stationId').value = b.id;
+              fetchAndProcessData();
+            });
+          });
+
+          L.circle([targetBuoy.lat, targetBuoy.lon], {
+            radius: 200 * 1609.34,
+            color: '#007bff',
+            fillColor: '#007bff',
+            fillOpacity: 0.08,
+            weight: 1.5
+          }).addTo(mapMarkersGroup);
+
+          map.setView([targetBuoy.lat, targetBuoy.lon], 7);
+        }
+      } catch (err) {
+        console.warn("Metadata list fallback active for local testing:", err);
+      }
     }
 
-    // --- Cloudflare Worker Fetch Implementation ---
     async function fetchNDBCFile(stationId, ext) {
       const targetUrl = `https://www.ndbc.noaa.gov/data/realtime2/${stationId}.${ext}`;
       const WORKER_URL = "https://noaa-wave-proxy.rwnster.workers.dev";
@@ -428,7 +410,6 @@
       return { timestamps, frequencies, matrices };
     }
 
-    // --- Main Data Pipeline ---
     async function fetchAndProcessData() {
       pause();
       const status = document.getElementById('statusMsg');
@@ -449,7 +430,6 @@
 
         status.innerText = "Processing spectral matrices...";
 
-        // Filter parsed NDBC data starting from the selected Start Date/Time
         let startIndex = 0;
         if (selectedStartDate) {
           const targetTime = new Date(selectedStartDate).getTime();
@@ -493,7 +473,6 @@
       }
     }
 
-    // --- Peak Detection Logic ---
     function analyzeFrame(frame) {
       const minFreq = 0.05, maxFreq = 0.20;
       const peakThresh = parseFloat(document.getElementById('peakThreshold').value);
@@ -518,7 +497,6 @@
       return clusters.sort((a,b) => b.energy - a.energy).slice(0, 4);
     }
 
-    // --- Dynamic Y-Max Helper ---
     function getGlobalYMax() {
       const minYLimit = parseFloat(document.getElementById('minYLimit').value) || 2.0;
       let maxEnergy = 0;
@@ -529,7 +507,6 @@
       return Math.max(minYLimit, maxEnergy * 1.05);
     }
 
-    // --- Plotting Engine ---
     function renderCurrentFrame() {
       if (!timeSeriesData.length) return;
 
@@ -540,7 +517,6 @@
       const clusters = analyzeFrame(frame);
       const globalYMax = getGlobalYMax();
       
-      // Dynamic parameters read from form inputs
       const periodLimit = parseFloat(document.getElementById('periodLimit').value) || 18;
       const surfEnergy = parseFloat(document.getElementById('surfEnergy').value) || 1.0;
       const surfPeriod = parseFloat(document.getElementById('surfPeriod').value) || 9;
@@ -590,7 +566,7 @@
       ];
 
       const polarLayout = {
-        title: { text: `Peak Swells (Polar)`, font: { size: 14 } },
+        title: { text: `Peak Swells (Polar)`, font: { size: 13 } },
         polar: {
           angularaxis: { direction: "clockwise", rotation: 90 },
           radialaxis: { 
@@ -600,7 +576,7 @@
           }
         },
         showlegend: false,
-        margin: { t: 40, b: 20, l: 30, r: 30 },
+        margin: { t: 55, b: 20, l: 30, r: 30 }, // Increased top margin to prevent toolbar overlap
         autosize: true
       };
 
@@ -628,14 +604,12 @@
       }));
 
       const spectralLayout = {
-        title: { text: `Energy Density vs Period`, font: { size: 14 } },
+        title: { text: `Energy Density vs Period`, font: { size: 13 } },
         xaxis: { title: 'Period (s)', range: [0, periodLimit] },
         yaxis: { title: 'Energy (m²/Hz)', range: [0, globalYMax] },
-        margin: { t: 40, b: 40, l: 40, r: 20 },
+        margin: { t: 55, b: 40, l: 40, r: 20 }, // Increased top margin to prevent toolbar overlap
         shapes: [
-          // Vertical dashed line for Surf Swell Period threshold
           { type: 'line', x0: surfPeriod, x1: surfPeriod, y0: 0, y1: globalYMax, line: { color: 'blue', dash: 'dash' } },
-          // Horizontal blue line for Surf Swell Energy threshold
           { type: 'line', x0: 0, x1: periodLimit, y0: surfEnergy, y1: surfEnergy, line: { color: 'blue', width: 2 } },
           ...swellRedLines
         ],
@@ -657,7 +631,7 @@
 
       Plotly.newPlot('spectralPlot', spectralData, spectralLayout, {responsive: true});
 
-      // --- 3. Render Heatmap ---
+      // --- 3. Heatmap Plot ---
       renderHeatmap(globalYMax, periodLimit);
     }
 
@@ -685,10 +659,10 @@
       }];
 
       const heatmapLayout = {
-        title: { text: `Spectral Density Heatmap Over Time`, font: { size: 14 } },
+        title: { text: `Spectral Density Heatmap Over Time`, font: { size: 13 } },
         xaxis: { title: 'Timeline Index' },
         yaxis: { title: 'Period (s)', range: [0, periodLimit] },
-        margin: { t: 40, b: 40, l: 40, r: 20 },
+        margin: { t: 55, b: 40, l: 40, r: 20 }, // Increased top margin to prevent toolbar overlap
         autosize: true,
         shapes: [
           {
@@ -710,7 +684,6 @@
       Plotly.newPlot('heatmapPlot', heatmapData, heatmapLayout, {responsive: true});
     }
 
-    // --- Media Controls Engine ---
     function togglePlay() {
       if (isPlaying) {
         pause();
@@ -766,7 +739,6 @@
       renderCurrentFrame();
     }
 
-    // Initialize App on Load
     window.onload = () => {
       setDefaultStartDate();
       fetchAndProcessData();
