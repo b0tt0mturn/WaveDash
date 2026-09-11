@@ -135,34 +135,29 @@
         fetchAndProcessData();
       });
     });
+// --- Cloudflare Worker Fetch Implementation ---
+async function fetchNDBCFile(stationId, ext) {
+  const targetUrl = `https://www.ndbc.noaa.gov/data/realtime2/${stationId}.${ext}`;
+  
+  // Paste your actual Cloudflare Worker URL here:
+  const WORKER_URL = "https://noaa-wave-proxy.<your-subdomain>.workers.dev";
 
-    // --- NDBC Data Fetching & Parsing (Throttled Single-Proxy) ---
-    async function fetchNDBCFile(stationId, ext) {
-      const targetUrl = `https://www.ndbc.noaa.gov/data/realtime2/${stationId}.${ext}`;
-      
-      // Secondary fallback proxies in case primary fails
-      const proxies = [
-        `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`,
-        `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`
-      ];
+  const proxyUrl = `${WORKER_URL}?url=${encodeURIComponent(targetUrl)}`;
 
-      for (const proxyUrl of proxies) {
-        try {
-          const response = await fetch(proxyUrl);
-          if (response.ok) {
-            const text = await response.text();
-            if (text && text.trim().length > 0 && !text.includes("403 Forbidden")) {
-              return parseNDBCFormat(text);
-            }
-          }
-        } catch (err) {
-          // Fall through to next proxy
-        }
-      }
+  const response = await fetch(proxyUrl);
+  
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} from Cloudflare worker while fetching .${ext}`);
+  }
 
-      throw new Error(`Failed to fetch .${ext}. NOAA or proxy may be throttling queries.`);
-    }
+  const text = await response.text();
+  
+  if (!text || text.trim().length === 0 || text.includes("403 Forbidden")) {
+    throw new Error(`Invalid data payload received for .${ext}`);
+  }
 
+  return parseNDBCFormat(text);
+}
     function parseNDBCFormat(text) {
       const lines = text.trim().split('\n');
       const timestamps = [];
