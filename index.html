@@ -13,6 +13,11 @@
   <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 
   <style>
+    html, body {
+      height: 100%;
+      overflow-y: auto; /* Enables page vertical scrolling */
+      -webkit-overflow-scrolling: touch;
+    }
     body { 
       font-family: Arial, sans-serif; 
       margin: 0; 
@@ -31,6 +36,7 @@
       display: flex; 
       flex-direction: column; 
       gap: 15px; 
+      padding-bottom: 20px;
     }
     .panel { 
       background: white; 
@@ -136,7 +142,7 @@
     .slider-container { display: flex; flex-direction: column; gap: 5px; margin-top: 5px; }
     .slider-container input { width: 100%; }
 
-    /* Plot Layout (Reduced ~10% for mobile landscape fit and extra spacing) */
+    /* Plot Layout */
     .plots-grid { 
       display: flex; 
       flex-direction: column; 
@@ -186,7 +192,7 @@
             </div>
 
             <div class="control-group span-full">
-              <label>Start Date & Time (UTC):</label>
+              <label>Start Date & Time (EST/EDT):</label>
               <input type="datetime-local" id="startDate">
             </div>
             
@@ -267,19 +273,70 @@
     let mapMarkersGroup = null;
     let dynamicBuoys = [];
 
+    // Custom afmhot colorscale capped at Light Yellow (starts at pure black)
+    const afmhotYellowCap = [
+      [0.0, '#000000'], // Black
+      [0.25, '#660000'], // Dark Red
+      [0.5, '#CC3300'], // Red-Orange
+      [0.75, '#FF6600'], // Bright Orange
+      [1.0, '#FFFF80']  // Light Yellow
+    ];
+
+    // Global Plotly Configuration to Disable Toolbar and Zoom Captures
+    const plotlyConfig = {
+      displayModeBar: false,
+      scrollZoom: false,
+      responsive: true
+    };
+
+    // Formats a JS Date object into Eastern Time string (New York)
+    function formatToET(dateObj) {
+      const options = {
+        timeZone: 'America/New_York',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+        timeZoneName: 'short'
+      };
+      const formatter = new Intl.DateTimeFormat('en-US', options);
+      const parts = formatter.formatToParts(dateObj);
+      
+      let year, month, day, hour, minute, timeZoneName;
+      for (const p of parts) {
+        if (p.type === 'year') year = p.value;
+        if (p.type === 'month') month = p.value;
+        if (p.type === 'day') day = p.value;
+        if (p.type === 'hour') hour = p.value;
+        if (p.type === 'minute') minute = p.value;
+        if (p.type === 'timeZoneName') timeZoneName = p.value;
+      }
+      return `${year}-${month}-${day} ${hour}:${minute} ${timeZoneName}`;
+    }
+
     function setDefaultStartDate() {
       const now = new Date();
-      now.setMinutes(0, 0, 0);
-      const year = now.getFullYear();
-      const month = String(now.getMonth() + 1).padStart(2, '0');
-      const day = String(now.getDate()).padStart(2, '0');
-      const hours = String(now.getHours()).padStart(2, '0');
+      // Format to current EST/EDT for input default
+      const estFormatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York',
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', hour12: false
+      });
+      const parts = estFormatter.formatToParts(now);
+      let year, month, day, hour;
+      for (const p of parts) {
+        if (p.type === 'year') year = p.value;
+        if (p.type === 'month') month = p.value;
+        if (p.type === 'day') day = p.value;
+        if (p.type === 'hour') hour = p.value;
+      }
       
-      const formattedDateTime = `${year}-${month}-${day}T${hours}:00`;
+      const formattedDateTime = `${year}-${month}-${day}T${hour}:00`;
       document.getElementById('startDate').value = formattedDateTime;
     }
 
-    // Switched to CartoDB Voyager tiles to prevent OSM User-Agent blocking
     const map = L.map('map').setView([34.211, -76.944], 7);
     L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
       attribution: '© OpenStreetMap contributors © CARTO',
@@ -403,8 +460,11 @@
           frequencies = matches.map(m => parseFloat(m[2]));
         }
 
-        const dateStr = `${parts[0]}-${parts[1].padStart(2,'0')}-${parts[2].padStart(2,'0')} ${parts[3].padStart(2,'0')}:${parts[4].padStart(2,'0')} UTC`;
-        timestamps.push(dateStr);
+        // Parse NOAA UTC time into standard JS Date object and convert to Eastern Time
+        const utcDate = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2], parts[3], parts[4]));
+        const etDateStr = formatToET(utcDate);
+
+        timestamps.push(etDateStr);
         matrices.push(matches.map(m => parseFloat(m[1])));
       }
       return { timestamps, frequencies, matrices };
@@ -434,7 +494,7 @@
         if (selectedStartDate) {
           const targetTime = new Date(selectedStartDate).getTime();
           for (let k = 0; k < spec.timestamps.length; k++) {
-            const frameTime = new Date(spec.timestamps[k].replace(' UTC', '')).getTime();
+            const frameTime = new Date(spec.timestamps[k]).getTime();
             if (frameTime <= targetTime) {
               startIndex = k;
               break;
@@ -511,7 +571,8 @@
       if (!timeSeriesData.length) return;
 
       const frame = timeSeriesData[currentFrameIdx];
-      document.getElementById('timestampDisplay').innerText = frame.timestamp;
+      const currentTimeStr = frame.timestamp; // Eastern Time string
+      document.getElementById('timestampDisplay').innerText = currentTimeStr;
 
       const periods = frame.frequencies.map(f => 1 / f);
       const clusters = analyzeFrame(frame);
@@ -521,6 +582,9 @@
       const surfEnergy = parseFloat(document.getElementById('surfEnergy').value) || 1.0;
       const surfPeriod = parseFloat(document.getElementById('surfPeriod').value) || 9;
       const critAngle = parseFloat(document.getElementById('critAngle').value);
+
+      const circleAngles = Array.from({length: 361}, (_, i) => i);
+      const circlePeriods = Array(361).fill(surfPeriod);
 
       // --- 1. Polar Plot ---
       const polarData = [
@@ -534,7 +598,7 @@
           marker: {
             size: clusters.map(c => Math.max(c.energy * 25, 12)),
             color: clusters.map(c => c.energy),
-            colorscale: 'Jet',
+            colorscale: afmhotYellowCap,
             cmin: 0,
             cmax: globalYMax,
             showscale: false
@@ -548,7 +612,7 @@
           hoverinfo: 'none',
           marker: {
             size: 4,
-            color: 'black'
+            color: 'white'
           }
         },
         {
@@ -560,27 +624,50 @@
           hoverinfo: 'name',
           line: {
             color: 'green',
-            width: 3
+            width: 2.5,
+            dash: 'solid'
+          }
+        },
+        {
+          type: 'scatterpolar',
+          mode: 'lines',
+          r: circlePeriods,
+          theta: circleAngles,
+          name: 'Crit Period Circle',
+          hoverinfo: 'none',
+          line: {
+            color: 'green',
+            width: 2,
+            dash: 'solid'
           }
         }
       ];
 
       const polarLayout = {
-        title: { text: `Peak Swells (Polar)`, font: { size: 13 } },
+        title: { text: `Peak Swells (Polar)<br><span style="font-size:11px;color:#555">${currentTimeStr}</span>`, font: { size: 13 } },
         polar: {
-          angularaxis: { direction: "clockwise", rotation: 90 },
+          angularaxis: { 
+            direction: "clockwise", 
+            rotation: 90,
+            tickmode: 'array',
+            tickvals: [0, 45, 90, 135, 180, 225, 270, 315],
+            ticktext: ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+          },
           radialaxis: { 
             range: [0, periodLimit],
             angle: -225,
-            tickangle: -225
+            tickangle: -225,
+            showgrid: false,    /* Hides the circumferential grid lines */
+            ticks: 'outside',   /* Leaves tick marks on the 315 radius */
+            nticks: 6           /* Restricts the radial tick labels to 6 */
           }
         },
         showlegend: false,
-        margin: { t: 55, b: 20, l: 30, r: 30 }, // Increased top margin to prevent toolbar overlap
+        margin: { t: 50, b: 20, l: 30, r: 30 },
         autosize: true
       };
 
-      Plotly.newPlot('polarPlot', polarData, polarLayout, {responsive: true});
+      Plotly.newPlot('polarPlot', polarData, polarLayout, plotlyConfig);
 
       // --- 2. Spectral Density Line Plot ---
       const spectralData = [
@@ -604,13 +691,27 @@
       }));
 
       const spectralLayout = {
-        title: { text: `Energy Density vs Period`, font: { size: 13 } },
+        title: { text: `Energy Density vs Period<br><span style="font-size:11px;color:#555">${currentTimeStr}</span>`, font: { size: 13 } },
         xaxis: { title: 'Period (s)', range: [0, periodLimit] },
         yaxis: { title: 'Energy (m²/Hz)', range: [0, globalYMax] },
-        margin: { t: 55, b: 40, l: 40, r: 20 }, // Increased top margin to prevent toolbar overlap
+        margin: { t: 50, b: 40, l: 40, r: 20 },
         shapes: [
-          { type: 'line', x0: surfPeriod, x1: surfPeriod, y0: 0, y1: globalYMax, line: { color: 'blue', dash: 'dash' } },
-          { type: 'line', x0: 0, x1: periodLimit, y0: surfEnergy, y1: surfEnergy, line: { color: 'blue', width: 2 } },
+          { 
+            type: 'line', 
+            x0: surfPeriod, 
+            x1: surfPeriod, 
+            y0: 0, 
+            y1: globalYMax, 
+            line: { color: 'green', width: 2, dash: 'solid' } 
+          },
+          { 
+            type: 'line', 
+            x0: 0, 
+            x1: periodLimit, 
+            y0: surfEnergy, 
+            y1: surfEnergy, 
+            line: { color: 'green', width: 2, dash: 'solid' } 
+          },
           ...swellRedLines
         ],
         annotations: [
@@ -623,19 +724,19 @@
             showarrow: false,
             xanchor: 'right',
             yanchor: 'bottom',
-            font: { color: 'blue', size: 10, weight: 'bold' }
+            font: { color: 'green', size: 10, weight: 'bold' }
           }
         ],
         autosize: true
       };
 
-      Plotly.newPlot('spectralPlot', spectralData, spectralLayout, {responsive: true});
+      Plotly.newPlot('spectralPlot', spectralData, spectralLayout, plotlyConfig);
 
       // --- 3. Heatmap Plot ---
-      renderHeatmap(globalYMax, periodLimit);
+      renderHeatmap(globalYMax, periodLimit, surfPeriod, currentTimeStr);
     }
 
-    function renderHeatmap(globalYMax, periodLimit) {
+    function renderHeatmap(globalYMax, periodLimit, surfPeriod, currentTimeStr) {
       const zValues = [];
       const yValues = timeSeriesData[0].frequencies.map(f => 1 / f);
       const xValues = timeSeriesData.map((_, idx) => `Hr ${idx}`);
@@ -653,16 +754,16 @@
         x: xValues,
         y: yValues,
         type: 'heatmap',
-        colorscale: 'Jet',
+        colorscale: afmhotYellowCap,
         zmin: 0,
         zmax: globalYMax || 2.0
       }];
 
       const heatmapLayout = {
-        title: { text: `Spectral Density Heatmap Over Time`, font: { size: 13 } },
+        title: { text: `Spectral Density Heatmap Over Time<br><span style="font-size:11px;color:#555">Active Frame: ${currentTimeStr}</span>`, font: { size: 13 } },
         xaxis: { title: 'Timeline Index' },
         yaxis: { title: 'Period (s)', range: [0, periodLimit] },
-        margin: { t: 55, b: 40, l: 40, r: 20 }, // Increased top margin to prevent toolbar overlap
+        margin: { t: 50, b: 40, l: 40, r: 20 },
         autosize: true,
         shapes: [
           {
@@ -677,11 +778,25 @@
               color: 'white',
               width: 3
             }
+          },
+          {
+            type: 'line',
+            xref: 'paper',
+            yref: 'y',
+            x0: 0,
+            x1: 1,
+            y0: surfPeriod,
+            y1: surfPeriod,
+            line: {
+              color: 'green',
+              width: 2,
+              dash: 'solid'
+            }
           }
         ]
       };
 
-      Plotly.newPlot('heatmapPlot', heatmapData, heatmapLayout, {responsive: true});
+      Plotly.newPlot('heatmapPlot', heatmapData, heatmapLayout, plotlyConfig);
     }
 
     function togglePlay() {
