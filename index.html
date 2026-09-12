@@ -5,17 +5,28 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Wave Dash - Live Interactive Spectral Analysis</title>
   
-  <!-- Leaflet CSS & JS for Interactive Map -->
+  <!-- Leaflet CSS & JS for Interactive Map (with cdnjs fallback if unpkg is blocked/unreachable) -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  
-  <!-- Plotly.js for Dynamic Vector Charts -->
+  <script>
+    if (typeof L === 'undefined') {
+      document.write('<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">');
+      document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"><\/script>');
+    }
+  </script>
+
+  <!-- Plotly.js for Dynamic Vector Charts (with jsdelivr fallback if cdn.plot.ly is blocked/unreachable) -->
   <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+  <script>
+    if (typeof Plotly === 'undefined') {
+      document.write('<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.27.0/plotly.min.js"><\/script>');
+    }
+  </script>
 
   <style>
     html, body {
       height: 100%;
-      overflow-y: auto; /* Enables page vertical scrolling */
+      overflow-y: auto;
       -webkit-overflow-scrolling: touch;
     }
     body { 
@@ -45,7 +56,6 @@
       box-shadow: 0 2px 5px rgba(0,0,0,0.1); 
     }
 
-    /* Side-by-Side Map & Parameters Container */
     .map-controls-row {
       display: flex;
       flex-direction: row;
@@ -68,7 +78,6 @@
       min-width: 0;
     }
 
-    /* Two-Column Grid Layout for Parameter Inputs */
     .params-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -120,7 +129,6 @@
     .btn:hover { background: #0056b3; }
     .status-msg { font-size: 10px; color: #6c757d; margin-top: 4px; font-style: italic; text-align: center; }
     
-    /* Player Controls */
     .player-controls { 
       display: flex; 
       gap: 4px; 
@@ -142,7 +150,6 @@
     .slider-container { display: flex; flex-direction: column; gap: 5px; margin-top: 5px; }
     .slider-container input { width: 100%; }
 
-    /* Plot Layout */
     .plots-grid { 
       display: flex; 
       flex-direction: column; 
@@ -153,7 +160,6 @@
       width: 100%;
     }
 
-    /* Desktop View & Landscape Overrides */
     @media (min-width: 768px) {
       body { padding: 15px; }
       h2 { font-size: 1.5rem; text-align: left; }
@@ -172,17 +178,14 @@
   <h2>🌊 Wave Dash - Ocean Wave Spectral Dashboard</h2>
 
   <div class="grid-container">
-    <!-- Map & Parameters Panel -->
     <div class="panel">
       <div class="map-controls-row">
         
-        <!-- Left Side: Interactive Map -->
         <div class="map-col">
           <label style="font-size: 12px; font-weight: bold; margin-bottom: 4px;">Select Wave Buoy:</label>
           <div id="map"></div>
         </div>
 
-        <!-- Right Side: Two-Column Parameters & Controls -->
         <div class="controls-col">
           <div class="params-grid">
             
@@ -240,9 +243,7 @@
       </div>
     </div>
 
-    <!-- Plots & Timeline Player Panel -->
     <div class="panel">
-      <!-- Media Player Bar -->
       <div class="player-controls">
         <button class="player-btn" onclick="firstFrame()">⏮ First</button>
         <button class="player-btn" onclick="stepFrame(-1)">◀ Rev</button>
@@ -256,7 +257,6 @@
         <input type="range" id="timeSlider" min="0" max="0" value="0" oninput="onSliderMove(this.value)">
       </div>
 
-      <!-- Live Plots -->
       <div class="plots-grid" style="margin-top: 15px;">
         <div id="polarPlot" class="plot-box"></div>
         <div id="spectralPlot" class="plot-box"></div>
@@ -266,197 +266,251 @@
   </div>
 
   <script>
-    let timeSeriesData = [];
-    let currentFrameIdx = 0;
-    let isPlaying = false;
-    let playInterval = null;
-    let mapMarkersGroup = null;
-    let dynamicBuoys = [];
+    /* =====================================================================
+       CONFIGURATION & CONSTANTS
+       Central place for values that used to be duplicated or hardcoded
+       ("magic numbers") in multiple functions throughout the file.
+       ===================================================================== */
+    const WORKER_URL = "https://noaa-wave-proxy.rwnster.workers.dev";
+    const EARTH_RADIUS_MILES = 3958.8;
+    const MILES_TO_METERS = 1609.34;
+    const NEARBY_BUOY_RADIUS_MILES = 200;
+    const PLAYBACK_INTERVAL_MS = 1000;
+    const MAX_SWELL_CLUSTERS = 4;
+    const PEAK_DETECT_MIN_FREQ_HZ = 0.05;
+    const PEAK_DETECT_MAX_FREQ_HZ = 0.20;
 
-    // Custom afmhot colorscale capped at Light Yellow (starts at pure black)
+    // Fallback values used only if a control's field is emptied/invalid.
+    // These intentionally mirror the value="..." defaults on the matching
+    // <input> elements above, so keep them in sync if those ever change.
+    const DEFAULTS = {
+      periodLimit: 18,
+      minYLimit: 2.0,
+      surfEnergy: 1.0,
+      surfPeriod: 9
+    };
+
     const afmhotYellowCap = [
-      [0.0, '#000000'], // Black
-      [0.25, '#660000'], // Dark Red
-      [0.5, '#CC3300'], // Red-Orange
-      [0.75, '#FF6600'], // Bright Orange
-      [1.0, '#FFFF80']  // Light Yellow
+      [0.0, '#000000'],
+      [0.25, '#660000'],
+      [0.5, '#CC3300'],
+      [0.75, '#FF6600'],
+      [1.0, '#FFFF80']
     ];
 
-    // Global Plotly Configuration to Disable Toolbar and Zoom Captures
     const plotlyConfig = {
       displayModeBar: false,
       scrollZoom: false,
       responsive: true
     };
 
-    // Formats a JS Date object into Eastern Time string (New York)
-    function formatToET(dateObj) {
-      const options = {
-        timeZone: 'America/New_York',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false,
-        timeZoneName: 'short'
+    // Reused Plotly line styles (previously the same object literal was
+    // repeated inline 4-5 times across the polar/spectral/heatmap layouts).
+    const SURF_GUIDE_LINE_STYLE = { color: 'green', width: 2, dash: 'solid' };
+    const CRIT_ANGLE_LINE_STYLE = { color: 'green', width: 2.5, dash: 'solid' };
+    const SWELL_MARKER_LINE_STYLE = { color: 'red', width: 2, dash: 'dash' };
+
+    /* =====================================================================
+       STATE
+       ===================================================================== */
+    let timeSeriesData = [];
+    let currentFrameIdx = 0;
+    let isPlaying = false;
+    let playInterval = null;
+    let mapMarkersGroup = null;
+
+    // Local static fallback database for common wave buoys (used only if
+    // the live NOAA activestations.xml fetch fails or times out).
+    const fallbackBuoyDatabase = [
+      { id: "41159", name: "41159 - Onslow Bay Outer, NC", lat: 34.211, lon: -76.944 },
+      { id: "41013", name: "41013 - Frying Pan Shoals, NC", lat: 33.436, lon: -77.743 },
+      { id: "41036", name: "41036 - Onslow Bay Inner, NC", lat: 34.207, lon: -76.949 },
+      { id: "41002", name: "41002 - South Hatteras, NC", lat: 31.759, lon: -74.936 },
+      { id: "41004", name: "41004 - Edisto, SC", lat: 32.502, lon: -79.099 },
+      { id: "41008", name: "41008 - Grays Reef, GA", lat: 31.400, lon: -80.866 },
+      { id: "41009", name: "41009 - Canaveral 20 NM East, FL", lat: 28.526, lon: -80.188 },
+      { id: "41010", name: "41010 - Canaveral 120 NM East, FL", lat: 28.878, lon: -78.485 },
+      { id: "44014", name: "44014 - Virginia Beach, VA", lat: 36.611, lon: -74.836 },
+      { id: "44025", name: "44025 - Long Island, NY", lat: 40.251, lon: -73.164 }
+    ];
+
+    /* =====================================================================
+       CONTROL PANEL HELPERS
+       One place that reads every control-panel input, instead of each
+       function independently calling document.getElementById(...).value.
+       ===================================================================== */
+    function getUserSettings() {
+      return {
+        stationId: document.getElementById('stationId').value.trim(),
+        hoursToPlot: parseInt(document.getElementById('hoursToPlot').value),
+        startDate: document.getElementById('startDate').value,
+        periodLimit: parseFloat(document.getElementById('periodLimit').value) || DEFAULTS.periodLimit,
+        minYLimit: parseFloat(document.getElementById('minYLimit').value) || DEFAULTS.minYLimit,
+        surfEnergy: parseFloat(document.getElementById('surfEnergy').value) || DEFAULTS.surfEnergy,
+        surfPeriod: parseFloat(document.getElementById('surfPeriod').value) || DEFAULTS.surfPeriod,
+        critAngle: parseFloat(document.getElementById('critAngle').value),
+        peakThreshold: parseFloat(document.getElementById('peakThreshold').value)
       };
-      const formatter = new Intl.DateTimeFormat('en-US', options);
-      const parts = formatter.formatToParts(dateObj);
-      
-      let year, month, day, hour, minute, timeZoneName;
-      for (const p of parts) {
-        if (p.type === 'year') year = p.value;
-        if (p.type === 'month') month = p.value;
-        if (p.type === 'day') day = p.value;
-        if (p.type === 'hour') hour = p.value;
-        if (p.type === 'minute') minute = p.value;
-        if (p.type === 'timeZoneName') timeZoneName = p.value;
-      }
-      return `${year}-${month}-${day} ${hour}:${minute} ${timeZoneName}`;
+    }
+
+    function buildProxyUrl(targetUrl) {
+      return `${WORKER_URL}?url=${encodeURIComponent(targetUrl)}`;
+    }
+
+    /* =====================================================================
+       DATE / TIME HELPERS
+       ===================================================================== */
+    function getETDateParts(dateObj, options) {
+      const formatter = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', ...options });
+      const parts = {};
+      formatter.formatToParts(dateObj).forEach(p => {
+        if (p.type !== 'literal') parts[p.type] = p.value;
+      });
+      return parts;
+    }
+
+    function formatToET(dateObj) {
+      const p = getETDateParts(dateObj, {
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hour12: false, timeZoneName: 'short'
+      });
+      return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute} ${p.timeZoneName}`;
     }
 
     function setDefaultStartDate() {
-      const now = new Date();
-      // Format to current EST/EDT for input default
-      const estFormatter = new Intl.DateTimeFormat('en-US', {
-        timeZone: 'America/New_York',
-        year: 'numeric', month: '2-digit', day: '2-digit',
-        hour: '2-digit', hour12: false
+      const p = getETDateParts(new Date(), {
+        year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hour12: false
       });
-      const parts = estFormatter.formatToParts(now);
-      let year, month, day, hour;
-      for (const p of parts) {
-        if (p.type === 'year') year = p.value;
-        if (p.type === 'month') month = p.value;
-        if (p.type === 'day') day = p.value;
-        if (p.type === 'hour') hour = p.value;
-      }
-      
-      const formattedDateTime = `${year}-${month}-${day}T${hour}:00`;
-      document.getElementById('startDate').value = formattedDateTime;
+      document.getElementById('startDate').value = `${p.year}-${p.month}-${p.day}T${p.hour}:00`;
     }
 
-    // --- Switch Map Engine to Esri Ocean Basemap ---
-    const map = L.map('map').setView([34.211, -76.944], 7);
+    /* =====================================================================
+       MAP INITIALIZATION
+       ===================================================================== */
+    let map = null;
+    if (typeof L === 'undefined') {
+      document.getElementById('map').innerHTML =
+        '<div style="display:flex;align-items:center;justify-content:center;height:100%;padding:10px;text-align:center;color:#d9534f;font-size:12px;">Map library failed to load (check network/ad-blocker for unpkg.com and cdnjs.cloudflare.com), then reload the page.</div>';
+      document.getElementById('statusMsg').innerText = 'Map library failed to load. Data fetching still works.';
+    } else {
+      map = L.map('map').setView([34.211, -76.944], 7);
 
-    // Esri Ocean Base Layer (No API key required)
-    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}', {
-      attribution: 'Tiles &copy; Esri &mdash; Sources: GEBCO, NOAA, CHS, GEOBASS, GAA',
-      maxZoom: 13
-    }).addTo(map);
+      L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}', {
+        attribution: 'Tiles &copy; Esri &mdash; Sources: GEBCO, NOAA, CHS, GEOBASS, GAA',
+        maxZoom: 13
+      }).addTo(map);
 
-    // Esri Ocean Reference/Labels Overlay
-    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Reference/MapServer/tile/{z}/{y}/{x}', {
-      maxZoom: 13
-    }).addTo(map);
+      L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Reference/MapServer/tile/{z}/{y}/{x}', {
+        maxZoom: 13
+      }).addTo(map);
 
-    mapMarkersGroup = L.layerGroup().addTo(map);
+      mapMarkersGroup = L.layerGroup().addTo(map);
+    }
 
     function getDistanceMiles(lat1, lon1, lat2, lon2) {
-      const R = 3958.8; 
       const dLat = (lat2 - lat1) * Math.PI / 180;
       const dLon = (lon2 - lon1) * Math.PI / 180;
-      const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+      const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
                 Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-                Math.sin(dLon/2) * Math.sin(dLon/2);
-      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-      return R * c;
+                Math.sin(dLon / 2) * Math.sin(dLon / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return EARTH_RADIUS_MILES * c;
     }
 
-    async function updateDynamicBuoyDatabase(activeStationId) {
-      const WORKER_URL = "https://noaa-wave-proxy.rwnster.workers.dev";
-      const targetUrl = "https://www.ndbc.noaa.gov/activestations.xml";
-      const proxyUrl = `${WORKER_URL}?url=${encodeURIComponent(targetUrl)}`;
-
+    function renderBuoysOnMap(buoyList, targetBuoy) {
+      if (!map || !mapMarkersGroup) return;
       mapMarkersGroup.clearLayers();
 
+      const nearbyBuoys = buoyList.filter(b =>
+        getDistanceMiles(targetBuoy.lat, targetBuoy.lon, b.lat, b.lon) <= NEARBY_BUOY_RADIUS_MILES
+      );
+
+      nearbyBuoys.forEach(b => {
+        const dist = getDistanceMiles(targetBuoy.lat, targetBuoy.lon, b.lat, b.lon);
+        const isTarget = (b.id.toUpperCase() === targetBuoy.id.toUpperCase());
+
+        const marker = L.circleMarker([b.lat, b.lon], {
+          radius: isTarget ? 8 : 6,
+          color: isTarget ? '#d9534f' : '#007bff',
+          fillColor: isTarget ? '#ff4d4d' : '#3399ff',
+          fillOpacity: 0.9,
+          weight: 2
+        }).addTo(mapMarkersGroup);
+
+        marker.bindPopup(`<b>Station ${b.id}</b><br>${b.name}<br>Distance: ${dist.toFixed(1)} miles`);
+        marker.on('click', () => {
+          document.getElementById('stationId').value = b.id;
+          fetchAndProcessData();
+        });
+      });
+
+      L.circle([targetBuoy.lat, targetBuoy.lon], {
+        radius: NEARBY_BUOY_RADIUS_MILES * MILES_TO_METERS,
+        color: '#007bff',
+        fillColor: '#007bff',
+        fillOpacity: 0.08,
+        weight: 1.5
+      }).addTo(mapMarkersGroup);
+
+      map.setView([targetBuoy.lat, targetBuoy.lon], 7);
+    }
+
+    /* =====================================================================
+       NOAA DATA FETCHING
+       ===================================================================== */
+    async function updateDynamicBuoyDatabase(activeStationId) {
+      const targetUrl = "https://www.ndbc.noaa.gov/activestations.xml";
+
       try {
-        const response = await fetch(proxyUrl);
+        const response = await fetch(buildProxyUrl(targetUrl));
         if (!response.ok) throw new Error("Could not fetch active NOAA stations database.");
-        
+
         const xmlText = await response.text();
         const parser = new DOMParser();
         const xmlDoc = parser.parseFromString(xmlText, "text/xml");
         const stationNodes = xmlDoc.getElementsByTagName("station");
 
-        let allWaveStations = [];
+        const allStations = [];
         let targetBuoy = null;
 
         for (let i = 0; i < stationNodes.length; i++) {
           const node = stationNodes[i];
-          const id = node.getAttribute("id") ? node.getAttribute("id").toLowerCase() : "";
+          const id = node.getAttribute("id") ? node.getAttribute("id").toUpperCase() : "";
           const lat = parseFloat(node.getAttribute("lat"));
           const lon = parseFloat(node.getAttribute("lon"));
-          const name = node.getAttribute("name") || `Station ${id.toUpperCase()}`;
-          const pgm = node.getAttribute("pgm") || "";
-          const spec = node.getAttribute("spec") || "";
-          const wave = node.getAttribute("wave") || "";
-
-          const hasWaveData = pgm.includes("wave") || spec.toLowerCase() === "y" || wave.toLowerCase() === "y";
+          const name = node.getAttribute("name") || `Station ${id}`;
+          // NOTE: NOAA's activestations.xml has no "has spectral wave data"
+          // attribute (real attrs are id/lat/lon/elev/name/owner/met/
+          // currents/waterquality/dart). We can't reliably filter to
+          // wave-only buoys from this file, so we show every nearby station
+          // with valid coordinates and track "met" only as a rough proxy
+          // for "this station is actively reporting something".
+          const metActive = (node.getAttribute("met") || "").toLowerCase() === "y";
 
           if (!isNaN(lat) && !isNaN(lon)) {
-            const stationObj = { id: id.toUpperCase(), name: `${id.toUpperCase()} - ${name}`, lat, lon, hasWaveData };
-            if (hasWaveData) allWaveStations.push(stationObj);
-            if (id === activeStationId.toLowerCase()) targetBuoy = stationObj;
+            const stationObj = { id, name: `${id} - ${name}`, lat, lon, metActive };
+            allStations.push(stationObj);
+            if (id === activeStationId.toUpperCase()) targetBuoy = stationObj;
           }
         }
 
-        if (targetBuoy) {
-          dynamicBuoys = allWaveStations.filter(b => getDistanceMiles(targetBuoy.lat, targetBuoy.lon, b.lat, b.lon) <= 200);
+        if (!targetBuoy) throw new Error("Target buoy not found in active XML list.");
+        renderBuoysOnMap(allStations, targetBuoy);
 
-          dynamicBuoys.forEach(b => {
-            const dist = getDistanceMiles(targetBuoy.lat, targetBuoy.lon, b.lat, b.lon);
-            const isTarget = (b.id === activeStationId.toUpperCase());
-
-            // Use L.circleMarker instead of default image-based markers
-            const marker = L.circleMarker([b.lat, b.lon], {
-              radius: isTarget ? 8 : 6,
-              color: isTarget ? '#d9534f' : '#007bff',
-              fillColor: isTarget ? '#ff4d4d' : '#3399ff',
-              fillOpacity: 0.9,
-              weight: 2
-            }).addTo(mapMarkersGroup);
-
-            marker.bindPopup(`<b>Station ${b.id}</b><br>${b.name}<br>Distance: ${dist.toFixed(1)} miles`);
-            marker.on('click', () => {
-              document.getElementById('stationId').value = b.id;
-              fetchAndProcessData();
-            });
-          });
-
-          L.circle([targetBuoy.lat, targetBuoy.lon], {
-            radius: 200 * 1609.34,
-            color: '#007bff',
-            fillColor: '#007bff',
-            fillOpacity: 0.08,
-            weight: 1.5
-          }).addTo(mapMarkersGroup);
-
-          map.setView([targetBuoy.lat, targetBuoy.lon], 7);
-        }
       } catch (err) {
-        console.warn("Metadata list fallback active for local testing:", err);
-        // Fallback: render target station marker directly if XML query is unavailable or fails
-        const targetId = activeStationId.toUpperCase();
-        const fallbackMarker = L.circleMarker([34.211, -76.944], {
-          radius: 8,
-          color: '#d9534f',
-          fillColor: '#ff4d4d',
-          fillOpacity: 0.9,
-          weight: 2
-        }).addTo(mapMarkersGroup);
-        
-        fallbackMarker.bindPopup(`<b>Station ${targetId}</b><br>Active Station`);
+        console.warn("Using fallback local database for markers:", err);
+        const searchId = activeStationId.toUpperCase();
+        const targetBuoy = fallbackBuoyDatabase.find(b => b.id === searchId) ||
+          { id: searchId, name: `Station ${searchId}`, lat: 34.211, lon: -76.944 };
+
+        renderBuoysOnMap(fallbackBuoyDatabase, targetBuoy);
       }
     }
 
     async function fetchNDBCFile(stationId, ext) {
       const targetUrl = `https://www.ndbc.noaa.gov/data/realtime2/${stationId}.${ext}`;
-      const WORKER_URL = "https://noaa-wave-proxy.rwnster.workers.dev";
-      const proxyUrl = `${WORKER_URL}?url=${encodeURIComponent(targetUrl)}`;
+      const response = await fetch(buildProxyUrl(targetUrl));
 
-      const response = await fetch(proxyUrl);
       if (!response.ok) {
         throw new Error(`HTTP ${response.status} from Cloudflare worker while fetching .${ext}`);
       }
@@ -489,11 +543,8 @@
           frequencies = matches.map(m => parseFloat(m[2]));
         }
 
-        // Parse NOAA UTC time into standard JS Date object and convert to Eastern Time
         const utcDate = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2], parts[3], parts[4]));
-        const etDateStr = formatToET(utcDate);
-
-        timestamps.push(etDateStr);
+        timestamps.push(formatToET(utcDate));
         matrices.push(matches.map(m => parseFloat(m[1])));
       }
       return { timestamps, frequencies, matrices };
@@ -502,36 +553,29 @@
     async function fetchAndProcessData() {
       pause();
       const status = document.getElementById('statusMsg');
-      const stationId = document.getElementById('stationId').value.trim();
-      const hoursToPlot = parseInt(document.getElementById('hoursToPlot').value);
-      const selectedStartDate = document.getElementById('startDate').value;
+      const settings = getUserSettings();
 
       try {
-        status.innerText = "Locating nearby wave buoys within 200mi...";
-        await updateDynamicBuoyDatabase(stationId);
+        status.innerText = `Locating nearby wave buoys within ${NEARBY_BUOY_RADIUS_MILES}mi...`;
+        await updateDynamicBuoyDatabase(settings.stationId);
 
         status.innerText = "Fetching buoy data via worker...";
         const [spec, alpha1, alpha2] = await Promise.all([
-          fetchNDBCFile(stationId, 'data_spec'),
-          fetchNDBCFile(stationId, 'swdir'),
-          fetchNDBCFile(stationId, 'swdir2')
+          fetchNDBCFile(settings.stationId, 'data_spec'),
+          fetchNDBCFile(settings.stationId, 'swdir'),
+          fetchNDBCFile(settings.stationId, 'swdir2')
         ]);
 
         status.innerText = "Processing spectral matrices...";
 
         let startIndex = 0;
-        if (selectedStartDate) {
-          const targetTime = new Date(selectedStartDate).getTime();
-          for (let k = 0; k < spec.timestamps.length; k++) {
-            const frameTime = new Date(spec.timestamps[k]).getTime();
-            if (frameTime <= targetTime) {
-              startIndex = k;
-              break;
-            }
-          }
+        if (settings.startDate) {
+          const targetTime = new Date(settings.startDate).getTime();
+          const foundIdx = spec.timestamps.findIndex(ts => new Date(ts).getTime() <= targetTime);
+          startIndex = foundIdx === -1 ? 0 : foundIdx;
         }
 
-        const endIndex = Math.min(startIndex + hoursToPlot, spec.timestamps.length);
+        const endIndex = Math.min(startIndex + settings.hoursToPlot, spec.timestamps.length);
         timeSeriesData = [];
 
         for (let i = endIndex - 1; i >= startIndex; i--) {
@@ -562,67 +606,65 @@
       }
     }
 
-    function analyzeFrame(frame) {
-      const minFreq = 0.05, maxFreq = 0.20;
-      const peakThresh = parseFloat(document.getElementById('peakThreshold').value);
-      
+    /* =====================================================================
+       SPECTRAL ANALYSIS
+       ===================================================================== */
+    function analyzeFrame(frame, peakThreshold) {
       const freqs = frame.frequencies;
       const periods = freqs.map(f => 1 / f);
-      const E = frame.energy;
-      const D1 = frame.alpha1;
+      const energyValues = frame.energy;
+      const directionValues = frame.alpha1;
 
       const clusters = [];
       for (let i = 1; i < freqs.length - 1; i++) {
-        if (freqs[i] >= minFreq && freqs[i] <= maxFreq) {
-          if (E[i] >= E[i-1] && E[i] >= E[i+1] && E[i] >= peakThresh) {
-            clusters.push({
-              period: periods[i],
-              energy: E[i],
-              direction: D1[i]
-            });
-          }
+        if (freqs[i] < PEAK_DETECT_MIN_FREQ_HZ || freqs[i] > PEAK_DETECT_MAX_FREQ_HZ) continue;
+        const isLocalPeak = energyValues[i] >= energyValues[i - 1] && energyValues[i] >= energyValues[i + 1];
+        if (isLocalPeak && energyValues[i] >= peakThreshold) {
+          clusters.push({
+            period: periods[i],
+            energy: energyValues[i],
+            direction: directionValues[i]
+          });
         }
       }
-      return clusters.sort((a,b) => b.energy - a.energy).slice(0, 4);
+      return clusters.sort((a, b) => b.energy - a.energy).slice(0, MAX_SWELL_CLUSTERS);
     }
 
-    function getGlobalYMax() {
-      const minYLimit = parseFloat(document.getElementById('minYLimit').value) || 2.0;
+    function getGlobalYMax(minYLimit) {
       let maxEnergy = 0;
-      for (let frame of timeSeriesData) {
+      for (const frame of timeSeriesData) {
         const frameMax = Math.max(...frame.energy);
         if (frameMax > maxEnergy) maxEnergy = frameMax;
       }
       return Math.max(minYLimit, maxEnergy * 1.05);
     }
 
+    /* =====================================================================
+       CHART RENDERING
+       ===================================================================== */
     function renderCurrentFrame() {
       if (!timeSeriesData.length) return;
 
+      const settings = getUserSettings();
       const frame = timeSeriesData[currentFrameIdx];
-      const currentTimeStr = frame.timestamp; // Eastern Time string
+      const currentTimeStr = frame.timestamp;
       document.getElementById('timestampDisplay').innerText = currentTimeStr;
 
       const periods = frame.frequencies.map(f => 1 / f);
-      const clusters = analyzeFrame(frame);
-      const globalYMax = getGlobalYMax();
-      
-      const periodLimit = parseFloat(document.getElementById('periodLimit').value) || 18;
-      const surfEnergy = parseFloat(document.getElementById('surfEnergy').value) || 1.0;
-      const surfPeriod = parseFloat(document.getElementById('surfPeriod').value) || 9;
-      const critAngle = parseFloat(document.getElementById('critAngle').value);
+      const clusters = analyzeFrame(frame, settings.peakThreshold);
+      const globalYMax = getGlobalYMax(settings.minYLimit);
+      const { periodLimit, surfEnergy, surfPeriod, critAngle } = settings;
 
-      const circleAngles = Array.from({length: 361}, (_, i) => i);
+      const circleAngles = Array.from({ length: 361 }, (_, i) => i);
       const circlePeriods = Array(361).fill(surfPeriod);
 
-      // --- 1. Polar Plot ---
       const polarData = [
         {
           type: 'scatterpolar',
           mode: 'markers+text',
           r: clusters.map(c => c.period),
           theta: clusters.map(c => c.direction),
-          text: clusters.map((c, i) => `Swell ${i+1}`),
+          text: clusters.map((c, i) => `Swell ${i + 1}`),
           textposition: 'top right',
           marker: {
             size: clusters.map(c => Math.max(c.energy * 25, 12)),
@@ -639,10 +681,7 @@
           r: clusters.map(c => c.period),
           theta: clusters.map(c => c.direction),
           hoverinfo: 'none',
-          marker: {
-            size: 4,
-            color: 'white'
-          }
+          marker: { size: 4, color: 'white' }
         },
         {
           type: 'scatterpolar',
@@ -651,11 +690,7 @@
           theta: [critAngle, critAngle],
           name: 'Crit Angle',
           hoverinfo: 'name',
-          line: {
-            color: 'green',
-            width: 2.5,
-            dash: 'solid'
-          }
+          line: CRIT_ANGLE_LINE_STYLE
         },
         {
           type: 'scatterpolar',
@@ -664,31 +699,27 @@
           theta: circleAngles,
           name: 'Crit Period Circle',
           hoverinfo: 'none',
-          line: {
-            color: 'green',
-            width: 2,
-            dash: 'solid'
-          }
+          line: SURF_GUIDE_LINE_STYLE
         }
       ];
 
       const polarLayout = {
         title: { text: `Peak Swells (Polar)<br><span style="font-size:11px;color:#555">${currentTimeStr}</span>`, font: { size: 13 } },
         polar: {
-          angularaxis: { 
-            direction: "clockwise", 
+          angularaxis: {
+            direction: "clockwise",
             rotation: 90,
             tickmode: 'array',
             tickvals: [0, 45, 90, 135, 180, 225, 270, 315],
             ticktext: ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
           },
-          radialaxis: { 
+          radialaxis: {
             range: [0, periodLimit],
             angle: -225,
             tickangle: -225,
-            showgrid: false,    /* Hides circumferential grid lines */
-            ticks: 'outside',   /* Restores tick marks at 315 NW */
-            nticks: 6           /* Limits radial tick text elements */
+            showgrid: false,
+            ticks: 'outside',
+            nticks: 6
           }
         },
         showlegend: false,
@@ -698,7 +729,6 @@
 
       Plotly.newPlot('polarPlot', polarData, polarLayout, plotlyConfig);
 
-      // --- 2. Spectral Density Line Plot ---
       const spectralData = [
         {
           x: periods,
@@ -716,7 +746,7 @@
         x1: c.period,
         y0: 0,
         y1: globalYMax,
-        line: { color: 'red', width: 2, dash: 'dash' }
+        line: SWELL_MARKER_LINE_STYLE
       }));
 
       const spectralLayout = {
@@ -725,22 +755,8 @@
         yaxis: { title: 'Energy (m²/Hz)', range: [0, globalYMax] },
         margin: { t: 50, b: 40, l: 40, r: 20 },
         shapes: [
-          { 
-            type: 'line', 
-            x0: surfPeriod, 
-            x1: surfPeriod, 
-            y0: 0, 
-            y1: globalYMax, 
-            line: { color: 'green', width: 2, dash: 'solid' } 
-          },
-          { 
-            type: 'line', 
-            x0: 0, 
-            x1: periodLimit, 
-            y0: surfEnergy, 
-            y1: surfEnergy, 
-            line: { color: 'green', width: 2, dash: 'solid' } 
-          },
+          { type: 'line', x0: surfPeriod, x1: surfPeriod, y0: 0, y1: globalYMax, line: SURF_GUIDE_LINE_STYLE },
+          { type: 'line', x0: 0, x1: periodLimit, y0: surfEnergy, y1: surfEnergy, line: SURF_GUIDE_LINE_STYLE },
           ...swellRedLines
         ],
         annotations: [
@@ -761,22 +777,13 @@
 
       Plotly.newPlot('spectralPlot', spectralData, spectralLayout, plotlyConfig);
 
-      // --- 3. Heatmap Plot ---
-      renderHeatmap(globalYMax, periodLimit, surfPeriod, currentTimeStr);
+      renderHeatmap({ globalYMax, periodLimit, surfPeriod, currentTimeStr });
     }
 
-    function renderHeatmap(globalYMax, periodLimit, surfPeriod, currentTimeStr) {
-      const zValues = [];
+    function renderHeatmap({ globalYMax, periodLimit, surfPeriod, currentTimeStr }) {
       const yValues = timeSeriesData[0].frequencies.map(f => 1 / f);
       const xValues = timeSeriesData.map((_, idx) => `Hr ${idx}`);
-
-      for (let j = 0; j < yValues.length; j++) {
-        const row = [];
-        for (let i = 0; i < timeSeriesData.length; i++) {
-          row.push(timeSeriesData[i].energy[j]);
-        }
-        zValues.push(row);
-      }
+      const zValues = yValues.map((_, j) => timeSeriesData.map(frame => frame.energy[j]));
 
       const heatmapData = [{
         z: zValues,
@@ -785,7 +792,7 @@
         type: 'heatmap',
         colorscale: afmhotYellowCap,
         zmin: 0,
-        zmax: globalYMax || 2.0
+        zmax: globalYMax || DEFAULTS.minYLimit
       }];
 
       const heatmapLayout = {
@@ -796,31 +803,14 @@
         autosize: true,
         shapes: [
           {
-            type: 'line',
-            xref: 'x',
-            yref: 'paper',
-            x0: `Hr ${currentFrameIdx}`,
-            x1: `Hr ${currentFrameIdx}`,
-            y0: 0,
-            y1: 1,
-            line: {
-              color: 'white',
-              width: 3
-            }
+            type: 'line', xref: 'x', yref: 'paper',
+            x0: `Hr ${currentFrameIdx}`, x1: `Hr ${currentFrameIdx}`, y0: 0, y1: 1,
+            line: { color: 'white', width: 3 }
           },
           {
-            type: 'line',
-            xref: 'paper',
-            yref: 'y',
-            x0: 0,
-            x1: 1,
-            y0: surfPeriod,
-            y1: surfPeriod,
-            line: {
-              color: 'green',
-              width: 2,
-              dash: 'solid'
-            }
+            type: 'line', xref: 'paper', yref: 'y',
+            x0: 0, x1: 1, y0: surfPeriod, y1: surfPeriod,
+            line: SURF_GUIDE_LINE_STYLE
           }
         ]
       };
@@ -828,26 +818,21 @@
       Plotly.newPlot('heatmapPlot', heatmapData, heatmapLayout, plotlyConfig);
     }
 
+    /* =====================================================================
+       PLAYBACK CONTROLS
+       ===================================================================== */
     function togglePlay() {
-      if (isPlaying) {
-        pause();
-      } else {
-        play();
-      }
+      isPlaying ? pause() : play();
     }
 
     function play() {
       isPlaying = true;
       document.getElementById('playBtn').innerText = "⏸ Pause";
       playInterval = setInterval(() => {
-        if (currentFrameIdx >= timeSeriesData.length - 1) {
-          currentFrameIdx = 0;
-        } else {
-          currentFrameIdx++;
-        }
+        currentFrameIdx = (currentFrameIdx >= timeSeriesData.length - 1) ? 0 : currentFrameIdx + 1;
         document.getElementById('timeSlider').value = currentFrameIdx;
         renderCurrentFrame();
-      }, 1000);
+      }, PLAYBACK_INTERVAL_MS);
     }
 
     function pause() {
@@ -883,6 +868,9 @@
       renderCurrentFrame();
     }
 
+    /* =====================================================================
+       INIT
+       ===================================================================== */
     window.onload = () => {
       setDefaultStartDate();
       fetchAndProcessData();
