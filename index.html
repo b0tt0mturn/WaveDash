@@ -764,7 +764,7 @@
           mode: 'markers+text',
           r: clusters.map(c => c.period),
           theta: clusters.map(c => c.direction),
-          text: clusters.map((c, i) => `Swell ${i + 1}`),
+          text: clusters.map((c, i) => `${i + 1}`),
           textposition: 'top right',
           marker: {
             size: clusters.map(c => Math.max(c.energy * 25, 12)),
@@ -808,7 +808,7 @@
         const w = frame.wind;
         const arrowLength = w.speedKts;
         const windColor = getWindColor(w.speedKts);
-        const labelText = `Wind: ${Math.round(w.speedKts)}g${Math.round(w.gustKts)} kts`;
+        const labelText = `${Math.round(w.speedKts)}g${Math.round(w.gustKts)} kts`;
 
         polarData.push({
           type: 'scatterpolar',
@@ -819,9 +819,9 @@
           textposition: 'top center',
           name: 'Wind Vector',
           hoverinfo: 'text',
-          line: { color: windColor, width: 3.5 },
+          line: { color: windColor, width: 4.0 },
           marker: { 
-            size: [0, 20], 
+            size: [0, 25], 
             symbol: 'arrow', 
             angle: w.towardsDir, 
             color: windColor 
