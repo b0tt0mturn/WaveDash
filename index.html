@@ -337,10 +337,18 @@
       document.getElementById('startDate').value = formattedDateTime;
     }
 
+    // --- Switch Map Engine to Esri Ocean Basemap ---
     const map = L.map('map').setView([34.211, -76.944], 7);
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-      attribution: '© OpenStreetMap contributors © CARTO',
-      maxZoom: 19
+
+    // Esri Ocean Base Layer (No API key required)
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}', {
+      attribution: 'Tiles &copy; Esri &mdash; Sources: GEBCO, NOAA, CHS, GEOBASS, GAA',
+      maxZoom: 13
+    }).addTo(map);
+
+    // Esri Ocean Reference/Labels Overlay
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Reference/MapServer/tile/{z}/{y}/{x}', {
+      maxZoom: 13
     }).addTo(map);
 
     mapMarkersGroup = L.layerGroup().addTo(map);
@@ -399,7 +407,17 @@
 
           dynamicBuoys.forEach(b => {
             const dist = getDistanceMiles(targetBuoy.lat, targetBuoy.lon, b.lat, b.lon);
-            const marker = L.marker([b.lat, b.lon]).addTo(mapMarkersGroup);
+            const isTarget = (b.id === activeStationId.toUpperCase());
+
+            // Use L.circleMarker instead of default image-based markers
+            const marker = L.circleMarker([b.lat, b.lon], {
+              radius: isTarget ? 8 : 6,
+              color: isTarget ? '#d9534f' : '#007bff',
+              fillColor: isTarget ? '#ff4d4d' : '#3399ff',
+              fillOpacity: 0.9,
+              weight: 2
+            }).addTo(mapMarkersGroup);
+
             marker.bindPopup(`<b>Station ${b.id}</b><br>${b.name}<br>Distance: ${dist.toFixed(1)} miles`);
             marker.on('click', () => {
               document.getElementById('stationId').value = b.id;
@@ -419,6 +437,17 @@
         }
       } catch (err) {
         console.warn("Metadata list fallback active for local testing:", err);
+        // Fallback: render target station marker directly if XML query is unavailable or fails
+        const targetId = activeStationId.toUpperCase();
+        const fallbackMarker = L.circleMarker([34.211, -76.944], {
+          radius: 8,
+          color: '#d9534f',
+          fillColor: '#ff4d4d',
+          fillOpacity: 0.9,
+          weight: 2
+        }).addTo(mapMarkersGroup);
+        
+        fallbackMarker.bindPopup(`<b>Station ${targetId}</b><br>Active Station`);
       }
     }
 
@@ -657,9 +686,9 @@
             range: [0, periodLimit],
             angle: -225,
             tickangle: -225,
-            showgrid: false,    /* Hides the circumferential grid lines */
-            ticks: 'outside',   /* Leaves tick marks on the 315 radius */
-            nticks: 6           /* Restricts the radial tick labels to 6 */
+            showgrid: false,    /* Hides circumferential grid lines */
+            ticks: 'outside',   /* Restores tick marks at 315 NW */
+            nticks: 6           /* Limits radial tick text elements */
           }
         },
         showlegend: false,
