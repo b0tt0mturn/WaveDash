@@ -438,8 +438,15 @@
         }).addTo(mapMarkersGroup);
 
         marker.bindPopup(`<b>Station ${b.id}</b><br>${b.name}<br>Distance: ${dist.toFixed(1)} miles`);
+        marker.bindTooltip(`Station ${b.id}`, { direction: 'top', offset: [0, -6] });
         marker.on('click', () => {
           document.getElementById('stationId').value = b.id;
+          // Recenter immediately using the coordinates we already have from
+          // this marker, rather than waiting on the async re-fetch below
+          // (which, if the live NOAA lookup fails and this buoy also isn't
+          // in the small fallback list, would otherwise fall back to a
+          // hardcoded default location instead of the buoy actually clicked).
+          if (map) map.setView([b.lat, b.lon], map.getZoom());
           fetchAndProcessData();
         });
       });
@@ -512,6 +519,9 @@
       const response = await fetch(buildProxyUrl(targetUrl));
 
       if (!response.ok) {
+        if (response.status === 404) {
+          throw new Error(`Station ${stationId} has no .${ext} file (HTTP 404) — it likely doesn't report spectral wave data.`);
+        }
         throw new Error(`HTTP ${response.status} from Cloudflare worker while fetching .${ext}`);
       }
 
