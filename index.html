@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Wave Dash - Live Interactive Spectral Analysis</title>
   
-  <!-- Leaflet CSS & JS for Interactive Map (with cdnjs fallback if unpkg is blocked/unreachable) -->
+  <!-- Leaflet CSS & JS for Interactive Map -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
@@ -15,7 +15,7 @@
     }
   </script>
 
-  <!-- Plotly.js for Dynamic Vector Charts (with jsdelivr fallback if cdn.plot.ly is blocked/unreachable) -->
+  <!-- Plotly.js for Dynamic Vector Charts -->
   <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
   <script>
     if (typeof Plotly === 'undefined') {
@@ -175,23 +175,28 @@
 </head>
 <body>
 
-  <h2>🌊 Wave Dash - Ocean Wave Spectral Dashboard</h2>
+  <h2>🌊 Wave Dash - Live Interactive Spectral Analysis</h2>
 
   <div class="grid-container">
     <div class="panel">
       <div class="map-controls-row">
         
         <div class="map-col">
-          <label style="font-size: 12px; font-weight: bold; margin-bottom: 4px;">Select Wave Buoy:</label>
+          <label style="font-size: 12px; font-weight: bold; margin-bottom: 4px;">Select Wave / Wind Buoy:</label>
           <div id="map"></div>
         </div>
 
         <div class="controls-col">
           <div class="params-grid">
             
-            <div class="control-group span-full">
-              <label>Station ID:</label>
+            <div class="control-group">
+              <label>Wave Station ID:</label>
               <input type="text" id="stationId" value="41159">
+            </div>
+
+            <div class="control-group">
+              <label>Wind Station ID:</label>
+              <input type="text" id="windStationId" value="CLKN7">
             </div>
 
             <div class="control-group span-full">
@@ -268,8 +273,6 @@
   <script>
     /* =====================================================================
        CONFIGURATION & CONSTANTS
-       Central place for values that used to be duplicated or hardcoded
-       ("magic numbers") in multiple functions throughout the file.
        ===================================================================== */
     const WORKER_URL = "https://noaa-wave-proxy.rwnster.workers.dev";
     const EARTH_RADIUS_MILES = 3958.8;
@@ -279,10 +282,8 @@
     const MAX_SWELL_CLUSTERS = 4;
     const PEAK_DETECT_MIN_FREQ_HZ = 0.05;
     const PEAK_DETECT_MAX_FREQ_HZ = 0.20;
+    const MPS_TO_KNOTS = 1.94384;
 
-    // Fallback values used only if a control's field is emptied/invalid.
-    // These intentionally mirror the value="..." defaults on the matching
-    // <input> elements above, so keep them in sync if those ever change.
     const DEFAULTS = {
       periodLimit: 18,
       minYLimit: 2.0,
@@ -304,8 +305,6 @@
       responsive: true
     };
 
-    // Reused Plotly line styles (previously the same object literal was
-    // repeated inline 4-5 times across the polar/spectral/heatmap layouts).
     const SURF_GUIDE_LINE_STYLE = { color: 'green', width: 2, dash: 'solid' };
     const CRIT_ANGLE_LINE_STYLE = { color: 'green', width: 2.5, dash: 'solid' };
     const SWELL_MARKER_LINE_STYLE = { color: 'red', width: 2, dash: 'dash' };
@@ -314,15 +313,15 @@
        STATE
        ===================================================================== */
     let timeSeriesData = [];
+    let windTimeSeriesMap = new Map();
     let currentFrameIdx = 0;
     let isPlaying = false;
     let playInterval = null;
     let mapMarkersGroup = null;
 
-    // Local static fallback database for common wave buoys (used only if
-    // the live NOAA activestations.xml fetch fails or times out).
     const fallbackBuoyDatabase = [
       { id: "41159", name: "41159 - Onslow Bay Outer, NC", lat: 34.211, lon: -76.944 },
+      { id: "CLKN7", name: "CLKN7 - Cape Lookout, NC", lat: 34.622, lon: -76.525 },
       { id: "41013", name: "41013 - Frying Pan Shoals, NC", lat: 33.436, lon: -77.743 },
       { id: "41036", name: "41036 - Onslow Bay Inner, NC", lat: 34.207, lon: -76.949 },
       { id: "41002", name: "41002 - South Hatteras, NC", lat: 31.759, lon: -74.936 },
@@ -335,13 +334,23 @@
     ];
 
     /* =====================================================================
+       COLOR GENERATOR (GREEN AT 0 KTS -> RED AT >=8 KTS)
+       ===================================================================== */
+    function getWindColor(speedKts) {
+      const norm = Math.min(Math.max(speedKts / 8.0, 0.0), 1.0);
+      const r = Math.round(255 * norm);
+      const g = Math.round(180 * (1 - norm));
+      const b = 0;
+      return `rgb(${r},${g},${b})`;
+    }
+
+    /* =====================================================================
        CONTROL PANEL HELPERS
-       One place that reads every control-panel input, instead of each
-       function independently calling document.getElementById(...).value.
        ===================================================================== */
     function getUserSettings() {
       return {
         stationId: document.getElementById('stationId').value.trim(),
+        windStationId: document.getElementById('windStationId').value.trim(),
         hoursToPlot: parseInt(document.getElementById('hoursToPlot').value),
         startDate: document.getElementById('startDate').value,
         periodLimit: parseFloat(document.getElementById('periodLimit').value) || DEFAULTS.periodLimit,
@@ -385,18 +394,18 @@
     }
 
     /* =====================================================================
-       MAP INITIALIZATION
+       MAP INITIALIZATION & RENDER
        ===================================================================== */
     let map = null;
     if (typeof L === 'undefined') {
       document.getElementById('map').innerHTML =
-        '<div style="display:flex;align-items:center;justify-content:center;height:100%;padding:10px;text-align:center;color:#d9534f;font-size:12px;">Map library failed to load (check network/ad-blocker for unpkg.com and cdnjs.cloudflare.com), then reload the page.</div>';
-      document.getElementById('statusMsg').innerText = 'Map library failed to load. Data fetching still works.';
+        '<div style="display:flex;align-items:center;justify-content:center;height:100%;padding:10px;text-align:center;color:#d9534f;font-size:12px;">Map library failed to load.</div>';
+      document.getElementById('statusMsg').innerText = 'Map library failed to load.';
     } else {
       map = L.map('map').setView([34.211, -76.944], 7);
 
       L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}', {
-        attribution: 'Tiles &copy; Esri &mdash; Sources: GEBCO, NOAA, CHS, GEOBASS, GAA',
+        attribution: 'Tiles &copy; Esri',
         maxZoom: 13
       }).addTo(map);
 
@@ -421,45 +430,63 @@
       if (!map || !mapMarkersGroup) return;
       mapMarkersGroup.clearLayers();
 
-      const nearbyBuoys = buoyList.filter(b =>
-        getDistanceMiles(targetBuoy.lat, targetBuoy.lon, b.lat, b.lon) <= NEARBY_BUOY_RADIUS_MILES
-      );
-
-      nearbyBuoys.forEach(b => {
-        const dist = getDistanceMiles(targetBuoy.lat, targetBuoy.lon, b.lat, b.lon);
-        const isTarget = (b.id.toUpperCase() === targetBuoy.id.toUpperCase());
-
-        const marker = L.circleMarker([b.lat, b.lon], {
-          radius: isTarget ? 8 : 6,
-          color: isTarget ? '#d9534f' : '#007bff',
-          fillColor: isTarget ? '#ff4d4d' : '#3399ff',
-          fillOpacity: 0.9,
-          weight: 2
-        }).addTo(mapMarkersGroup);
-
-        marker.bindPopup(`<b>Station ${b.id}</b><br>${b.name}<br>Distance: ${dist.toFixed(1)} miles`);
-        marker.bindTooltip(`Station ${b.id}`, { direction: 'top', offset: [0, -6] });
-        marker.on('click', () => {
-          document.getElementById('stationId').value = b.id;
-          // Recenter immediately using the coordinates we already have from
-          // this marker, rather than waiting on the async re-fetch below
-          // (which, if the live NOAA lookup fails and this buoy also isn't
-          // in the small fallback list, would otherwise fall back to a
-          // hardcoded default location instead of the buoy actually clicked).
-          if (map) map.setView([b.lat, b.lon], map.getZoom());
-          fetchAndProcessData();
-        });
-      });
-
       L.circle([targetBuoy.lat, targetBuoy.lon], {
         radius: NEARBY_BUOY_RADIUS_MILES * MILES_TO_METERS,
         color: '#007bff',
         fillColor: '#007bff',
         fillOpacity: 0.08,
-        weight: 1.5
+        weight: 1.5,
+        interactive: false
       }).addTo(mapMarkersGroup);
 
-      map.setView([targetBuoy.lat, targetBuoy.lon], 7);
+      const nearbyBuoys = buoyList.filter(b =>
+        getDistanceMiles(targetBuoy.lat, targetBuoy.lon, b.lat, b.lon) <= NEARBY_BUOY_RADIUS_MILES
+      );
+
+      const currentWaveId = document.getElementById('stationId').value.trim().toUpperCase();
+      const currentWindId = document.getElementById('windStationId').value.trim().toUpperCase();
+
+      nearbyBuoys.forEach(b => {
+        const dist = getDistanceMiles(targetBuoy.lat, targetBuoy.lon, b.lat, b.lon);
+        const isWaveTarget = (b.id.toUpperCase() === currentWaveId);
+        const isWindTarget = (b.id.toUpperCase() === currentWindId);
+
+        let color = '#007bff';
+        let fillColor = '#3399ff';
+        if (isWaveTarget) {
+          color = '#d9534f';
+          fillColor = '#ff4d4d';
+        } else if (isWindTarget) {
+          color = '#28a745';
+          fillColor = '#5cb85c';
+        }
+
+        const marker = L.circleMarker([b.lat, b.lon], {
+          radius: (isWaveTarget || isWindTarget) ? 8 : 6,
+          color: color,
+          fillColor: fillColor,
+          fillOpacity: 0.9,
+          weight: 2,
+          interactive: true
+        }).addTo(mapMarkersGroup);
+
+        marker.bindTooltip(`Station ${b.id}`, { permanent: false, direction: 'top', offset: [0, -8] });
+        marker.bindPopup(`<b>Station ${b.id}</b><br>${b.name}<br>Distance: ${dist.toFixed(1)} miles<br><br>
+          <button onclick="setMapStation('${b.id}', 'wave')" style="padding:4px 8px;font-size:10px;cursor:pointer;">Set Wave ID</button>
+          <button onclick="setMapStation('${b.id}', 'wind')" style="padding:4px 8px;font-size:10px;cursor:pointer;">Set Wind ID</button>
+        `);
+      });
+
+      map.setView([targetBuoy.lat, targetBuoy.lon], map.getZoom());
+    }
+
+    function setMapStation(id, type) {
+      if (type === 'wave') {
+        document.getElementById('stationId').value = id;
+      } else {
+        document.getElementById('windStationId').value = id;
+      }
+      fetchAndProcessData();
     }
 
     /* =====================================================================
@@ -486,16 +513,9 @@
           const lat = parseFloat(node.getAttribute("lat"));
           const lon = parseFloat(node.getAttribute("lon"));
           const name = node.getAttribute("name") || `Station ${id}`;
-          // NOTE: NOAA's activestations.xml has no "has spectral wave data"
-          // attribute (real attrs are id/lat/lon/elev/name/owner/met/
-          // currents/waterquality/dart). We can't reliably filter to
-          // wave-only buoys from this file, so we show every nearby station
-          // with valid coordinates and track "met" only as a rough proxy
-          // for "this station is actively reporting something".
-          const metActive = (node.getAttribute("met") || "").toLowerCase() === "y";
 
           if (!isNaN(lat) && !isNaN(lon)) {
-            const stationObj = { id, name: `${id} - ${name}`, lat, lon, metActive };
+            const stationObj = { id, name: `${id} - ${name}`, lat, lon };
             allStations.push(stationObj);
             if (id === activeStationId.toUpperCase()) targetBuoy = stationObj;
           }
@@ -520,9 +540,9 @@
 
       if (!response.ok) {
         if (response.status === 404) {
-          throw new Error(`Station ${stationId} has no .${ext} file (HTTP 404) — it likely doesn't report spectral wave data.`);
+          throw new Error(`Station ${stationId} has no .${ext} file (HTTP 404).`);
         }
-        throw new Error(`HTTP ${response.status} from Cloudflare worker while fetching .${ext}`);
+        throw new Error(`HTTP ${response.status} fetching .${ext}`);
       }
 
       const text = await response.text();
@@ -531,6 +551,67 @@
       }
 
       return parseNDBCFormat(text);
+    }
+
+    async function fetchWindData(windStationId) {
+      const targetUrl = `https://www.ndbc.noaa.gov/data/realtime2/${windStationId}.txt`;
+      const response = await fetch(buildProxyUrl(targetUrl));
+
+      if (!response.ok) {
+        if (response.status === 404) {
+          throw new Error(`Wind Station ${windStationId} not found (HTTP 404).`);
+        }
+        throw new Error(`HTTP ${response.status} fetching wind data for ${windStationId}`);
+      }
+
+      const text = await response.text();
+      if (!text || text.trim().length === 0 || text.includes("403 Forbidden")) {
+        throw new Error(`Invalid payload for Wind Station ${windStationId}`);
+      }
+
+      return parseNDBCWindFormat(text);
+    }
+
+    function parseNDBCWindFormat(text) {
+      const lines = text.trim().split('\n');
+      const windMap = new Map();
+
+      for (let line of lines) {
+        line = line.trim();
+        if (line.startsWith('#') || !line) continue;
+
+        const parts = line.split(/\s+/);
+        if (parts.length < 8) continue;
+
+        const year = parts[0];
+        const month = parts[1];
+        const day = parts[2];
+        const hour = parts[3];
+        const minute = parts[4];
+
+        const wdir = parseFloat(parts[5]);
+        const wspd = parseFloat(parts[6]);
+        const gst = parseFloat(parts[7]);
+
+        const utcDate = new Date(Date.UTC(year, month - 1, day, hour, minute));
+        const formattedTimestamp = formatToET(utcDate);
+
+        if (!isNaN(wdir) && !isNaN(wspd)) {
+          const wspdKts = wspd * MPS_TO_KNOTS;
+          const gstKts = !isNaN(gst) ? gst * MPS_TO_KNOTS : wspdKts;
+
+          // Wind direction blowing TOWARDS (e.g., West Wind coming from 270° points East to 90°)
+          const towardsDir = (wdir + 180) % 360;
+
+          windMap.set(formattedTimestamp, {
+            fromDir: wdir,
+            towardsDir: towardsDir,
+            speedKts: wspdKts,
+            gustKts: gstKts
+          });
+        }
+      }
+      return windMap;
     }
 
     function parseNDBCFormat(text) {
@@ -569,12 +650,22 @@
         status.innerText = `Locating nearby wave buoys within ${NEARBY_BUOY_RADIUS_MILES}mi...`;
         await updateDynamicBuoyDatabase(settings.stationId);
 
-        status.innerText = "Fetching buoy data via worker...";
+        status.innerText = "Fetching buoy and wind data...";
+        
+        let windErrorMsg = null;
         const [spec, alpha1, alpha2] = await Promise.all([
           fetchNDBCFile(settings.stationId, 'data_spec'),
           fetchNDBCFile(settings.stationId, 'swdir'),
           fetchNDBCFile(settings.stationId, 'swdir2')
         ]);
+
+        try {
+          windTimeSeriesMap = await fetchWindData(settings.windStationId);
+        } catch (wErr) {
+          windTimeSeriesMap = new Map();
+          windErrorMsg = wErr.message;
+          alert(`Wind Data Warning: ${wErr.message}`);
+        }
 
         status.innerText = "Processing spectral matrices...";
 
@@ -589,12 +680,14 @@
         timeSeriesData = [];
 
         for (let i = endIndex - 1; i >= startIndex; i--) {
+          const ts = spec.timestamps[i];
           timeSeriesData.push({
-            timestamp: spec.timestamps[i],
+            timestamp: ts,
             frequencies: spec.frequencies,
             energy: spec.matrices[i],
             alpha1: alpha1.matrices[i],
-            alpha2: alpha2.matrices[i]
+            alpha2: alpha2.matrices[i],
+            wind: windTimeSeriesMap.get(ts) || null
           });
         }
 
@@ -608,7 +701,7 @@
         currentFrameIdx = timeSeriesData.length - 1;
 
         renderCurrentFrame();
-        status.innerText = "Updated successfully.";
+        status.innerText = windErrorMsg ? `Wave data updated (Wind warning: ${windErrorMsg})` : "Updated successfully.";
 
       } catch (err) {
         status.innerText = "Fetch error.";
@@ -617,7 +710,7 @@
     }
 
     /* =====================================================================
-       SPECTRAL ANALYSIS
+       SPECTRAL ANALYSIS & CHARTS
        ===================================================================== */
     function analyzeFrame(frame, peakThreshold) {
       const freqs = frame.frequencies;
@@ -649,9 +742,6 @@
       return Math.max(minYLimit, maxEnergy * 1.05);
     }
 
-    /* =====================================================================
-       CHART RENDERING
-       ===================================================================== */
     function renderCurrentFrame() {
       if (!timeSeriesData.length) return;
 
@@ -713,8 +803,34 @@
         }
       ];
 
+      // Render Dynamic Wind Arrow scaled to radial magnitude (knots = period radius)
+      if (frame.wind) {
+        const w = frame.wind;
+        const arrowLength = w.speedKts;
+        const windColor = getWindColor(w.speedKts);
+        const labelText = `Wind: ${Math.round(w.speedKts)}g${Math.round(w.gustKts)} kts`;
+
+        polarData.push({
+          type: 'scatterpolar',
+          mode: 'lines+markers+text',
+          r: [0, arrowLength],
+          theta: [w.towardsDir, w.towardsDir],
+          text: ['', labelText],
+          textposition: 'top center',
+          name: 'Wind Vector',
+          hoverinfo: 'text',
+          line: { color: windColor, width: 3.5 },
+          marker: { 
+            size: [0, 10], 
+            symbol: 'arrow', 
+            angle: w.towardsDir, 
+            color: windColor 
+          }
+        });
+      }
+
       const polarLayout = {
-        title: { text: `Peak Swells (Polar)<br><span style="font-size:11px;color:#555">${currentTimeStr}</span>`, font: { size: 13 } },
+        title: { text: `Peak Swells & Wind (Polar)<br><span style="font-size:11px;color:#555">${currentTimeStr}</span>`, font: { size: 13 } },
         polar: {
           angularaxis: {
             direction: "clockwise",
