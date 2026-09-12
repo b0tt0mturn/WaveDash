@@ -147,8 +147,44 @@
       border-radius: 4px; 
     }
     .player-btn:hover { background: #dee2e6; }
+    
+    .speed-select {
+      padding: 7px 4px;
+      border-radius: 4px;
+      border: 1px solid #ced4da;
+      font-weight: bold;
+      font-size: 11px;
+      cursor: pointer;
+      background: #fff;
+    }
+
     .slider-container { display: flex; flex-direction: column; gap: 5px; margin-top: 5px; }
     .slider-container input { width: 100%; }
+
+    .legend-bar {
+      display: flex;
+      justify-content: center;
+      gap: 15px;
+      margin-top: 10px;
+      padding: 6px;
+      background: #f8f9fa;
+      border-radius: 6px;
+      border: 1px solid #e9ecef;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      font-weight: bold;
+      color: #333;
+    }
+    .legend-color-box {
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+      display: inline-block;
+    }
 
     .plots-grid { 
       display: flex; 
@@ -255,12 +291,23 @@
         <button class="player-btn" id="playBtn" onclick="togglePlay()">▶ Play</button>
         <button class="player-btn" onclick="stepFrame(1)">Next ▶</button>
         <button class="player-btn" onclick="lastFrame()">Last ⏭</button>
+        
+        <!-- Speed Dropdown -->
+        <select id="speedSelect" class="speed-select" onchange="onSpeedChange()">
+          <option value="2000">0.5x</option>
+          <option value="1000" selected>1x</option>
+          <option value="500">2x</option>
+          <option value="250">4x</option>
+        </select>
       </div>
 
       <div class="slider-container">
         <span id="timestampDisplay" style="font-weight: bold; text-align: center;">Loading...</span>
         <input type="range" id="timeSlider" min="0" max="0" value="0" oninput="onSliderMove(this.value)">
       </div>
+
+      <!-- Swell Rank Legend Key -->
+      <div id="swellLegend" class="legend-bar"></div>
 
       <div class="plots-grid" style="margin-top: 15px;">
         <div id="polarPlot" class="plot-box"></div>
@@ -283,6 +330,8 @@
     const PEAK_DETECT_MIN_FREQ_HZ = 0.05;
     const PEAK_DETECT_MAX_FREQ_HZ = 0.20;
     const MPS_TO_KNOTS = 1.94384;
+
+    const SWELL_RANK_COLORS = ['#e6194B', '#3cb44b', '#ffe119', '#4363d8']; 
 
     const DEFAULTS = {
       periodLimit: 18,
@@ -307,7 +356,6 @@
 
     const SURF_GUIDE_LINE_STYLE = { color: 'green', width: 2, dash: 'solid' };
     const CRIT_ANGLE_LINE_STYLE = { color: 'green', width: 2.5, dash: 'solid' };
-    const SWELL_MARKER_LINE_STYLE = { color: 'red', width: 2, dash: 'dash' };
 
     /* =====================================================================
        STATE
@@ -334,7 +382,7 @@
     ];
 
     /* =====================================================================
-       COLOR GENERATOR (GREEN AT 0 KTS -> RED AT >=8 KTS)
+       COLOR GENERATOR
        ===================================================================== */
     function getWindColor(speedKts) {
       const norm = Math.min(Math.max(speedKts / 8.0, 0.0), 1.0);
@@ -600,7 +648,6 @@
           const wspdKts = wspd * MPS_TO_KNOTS;
           const gstKts = !isNaN(gst) ? gst * MPS_TO_KNOTS : wspdKts;
 
-          // Wind direction blowing TOWARDS (e.g., West Wind coming from 270° points East to 90°)
           const towardsDir = (wdir + 180) % 360;
 
           windMap.set(formattedTimestamp, {
@@ -742,6 +789,26 @@
       return Math.max(minYLimit, maxEnergy * 1.05);
     }
 
+    function updateSwellLegend(clusterCount) {
+      const legendContainer = document.getElementById('swellLegend');
+      if (clusterCount === 0) {
+        legendContainer.innerHTML = '<span style="font-size:11px;color:#888;">No prominent swells detected above threshold.</span>';
+        return;
+      }
+
+      let html = '';
+      for (let i = 0; i < clusterCount; i++) {
+        const color = SWELL_RANK_COLORS[i % SWELL_RANK_COLORS.length];
+        html += `
+          <div class="legend-item">
+            <span class="legend-color-box" style="background-color: ${color};"></span>
+            <span>Swell ${i + 1}</span>
+          </div>
+        `;
+      }
+      legendContainer.innerHTML = html;
+    }
+
     function renderCurrentFrame() {
       if (!timeSeriesData.length) return;
 
@@ -755,34 +822,39 @@
       const globalYMax = getGlobalYMax(settings.minYLimit);
       const { periodLimit, surfEnergy, surfPeriod, critAngle } = settings;
 
+      updateSwellLegend(clusters.length);
+
       const circleAngles = Array.from({ length: 361 }, (_, i) => i);
       const circlePeriods = Array(361).fill(surfPeriod);
 
       const polarData = [
+        // 1. Swell Markers (Colored by Rank, text labels removed)
         {
           type: 'scatterpolar',
-          mode: 'markers+text',
+          mode: 'markers',
           r: clusters.map(c => c.period),
           theta: clusters.map(c => c.direction),
-          text: clusters.map((c, i) => `${i + 1}`),
-          textposition: 'top right',
+          hoverinfo: 'text',
+          hovertext: clusters.map((c, i) => `Swell ${i + 1}: ${c.energy.toFixed(2)} m²/Hz @ ${c.period.toFixed(1)}s`),
           marker: {
             size: clusters.map(c => Math.max(c.energy * 25, 12)),
-            color: clusters.map(c => c.energy),
-            colorscale: afmhotYellowCap,
-            cmin: 0,
-            cmax: globalYMax,
-            showscale: false
+            color: clusters.map((_, i) => SWELL_RANK_COLORS[i % SWELL_RANK_COLORS.length]),
+            opacity: 0.85
           }
         },
+        // 2. Swell Center Accent Dots (Matching Rank Colors)
         {
           type: 'scatterpolar',
           mode: 'markers',
           r: clusters.map(c => c.period),
           theta: clusters.map(c => c.direction),
           hoverinfo: 'none',
-          marker: { size: 4, color: 'white' }
+          marker: { 
+            size: 5, 
+            color: clusters.map((_, i) => SWELL_RANK_COLORS[i % SWELL_RANK_COLORS.length]) 
+          }
         },
+        // 3. Critical Angle Line
         {
           type: 'scatterpolar',
           mode: 'lines',
@@ -792,6 +864,7 @@
           hoverinfo: 'name',
           line: CRIT_ANGLE_LINE_STYLE
         },
+        // 4. Surf Period Guide Circle
         {
           type: 'scatterpolar',
           mode: 'lines',
@@ -803,34 +876,71 @@
         }
       ];
 
-      // Render Dynamic Wind Arrow scaled to radial magnitude (knots = period radius)
+      // Dynamic Wind Arrow with Multi-line Label
       if (frame.wind) {
         const w = frame.wind;
         const arrowLength = w.speedKts;
         const windColor = getWindColor(w.speedKts);
-        const labelText = `${Math.round(w.speedKts)}g${Math.round(w.gustKts)} kts`;
+        const labelText = `${Math.round(w.speedKts)}g${Math.round(w.gustKts)}<br>kts`;
+
+        const HEAD_LEN = 1.5;
+        const labelRadius = Math.max(arrowLength, HEAD_LEN) + 0.8;
+
+        let dynamicPos = 'top center';
+        const dir = w.fromDir % 360;
+        if (dir >= 135 && dir <= 225) {
+          dynamicPos = 'bottom center';
+        } else if (dir > 45 && dir < 135) {
+          dynamicPos = 'middle right';
+        } else if (dir > 225 && dir < 315) {
+          dynamicPos = 'middle left';
+        }
+
+        if (arrowLength >= HEAD_LEN) {
+          polarData.push({
+            type: 'scatterpolar',
+            mode: 'lines',
+            r: [HEAD_LEN, arrowLength],
+            theta: [w.fromDir, w.fromDir],
+            name: 'Wind Stem',
+            hoverinfo: 'none',
+            line: { color: windColor, width: 3.5 }
+          });
+        }
 
         polarData.push({
           type: 'scatterpolar',
-          mode: 'lines+markers+text',
-          r: [0, arrowLength],
-          theta: [w.towardsDir, w.towardsDir],
-          text: ['', labelText],
-          textposition: 'top center',
-          name: 'Wind Vector',
-          hoverinfo: 'text',
-          line: { color: windColor, width: 4.0 },
+          mode: 'markers',
+          r: [0],
+          theta: [w.fromDir],
+          name: 'Wind Arrowhead',
+          hoverinfo: 'none',
           marker: { 
-            size: [0, 25], 
+            size: 22, 
             symbol: 'arrow', 
-            angle: w.towardsDir, 
+            angle: (w.fromDir + 180) % 360, 
             color: windColor 
           }
+        });
+
+        polarData.push({
+          type: 'scatterpolar',
+          mode: 'text',
+          r: [labelRadius],
+          theta: [w.fromDir],
+          text: [labelText],
+          textposition: dynamicPos,
+          textfont: { color: windColor, size: 11, weight: 'bold' },
+          name: 'Wind Label',
+          hoverinfo: 'text'
         });
       }
 
       const polarLayout = {
-        title: { text: `Peak Swells & Wind (Polar)<br><span style="font-size:11px;color:#555">${currentTimeStr}</span>`, font: { size: 13 } },
+        title: { 
+          text: `Peak Swells & Wind (Polar) — <span style="font-size:11px;color:#555">${currentTimeStr}</span>`, 
+          font: { size: 13 } 
+        },
         polar: {
           angularaxis: {
             direction: "clockwise",
@@ -849,7 +959,7 @@
           }
         },
         showlegend: false,
-        margin: { t: 50, b: 20, l: 30, r: 30 },
+        margin: { t: 40, b: 20, l: 30, r: 30 },
         autosize: true
       };
 
@@ -866,24 +976,45 @@
         }
       ];
 
-      const swellRedLines = clusters.map(c => ({
+      // Swell Vertical Lines
+      const swellRankLines = clusters.map((c, i) => ({
         type: 'line',
         x0: c.period,
         x1: c.period,
         y0: 0,
         y1: globalYMax,
-        line: SWELL_MARKER_LINE_STYLE
+        line: {
+          color: SWELL_RANK_COLORS[i % SWELL_RANK_COLORS.length],
+          width: 2,
+          dash: 'dash'
+        }
+      }));
+
+      // Swell Line Number Annotations
+      const swellAnnotations = clusters.map((c, i) => ({
+        x: c.period,
+        y: globalYMax,
+        xref: 'x',
+        yref: 'y',
+        text: `${i + 1}`,
+        showarrow: false,
+        yanchor: 'bottom',
+        font: {
+          color: SWELL_RANK_COLORS[i % SWELL_RANK_COLORS.length],
+          size: 12,
+          weight: 'bold'
+        }
       }));
 
       const spectralLayout = {
-        title: { text: `Energy Density vs Period<br><span style="font-size:11px;color:#555">${currentTimeStr}</span>`, font: { size: 13 } },
+        title: { text: `Energy Density vs Period — <span style="font-size:11px;color:#555">${currentTimeStr}</span>`, font: { size: 13 } },
         xaxis: { title: 'Period (s)', range: [0, periodLimit] },
         yaxis: { title: 'Energy (m²/Hz)', range: [0, globalYMax] },
-        margin: { t: 50, b: 40, l: 40, r: 20 },
+        margin: { t: 40, b: 40, l: 40, r: 20 },
         shapes: [
           { type: 'line', x0: surfPeriod, x1: surfPeriod, y0: 0, y1: globalYMax, line: SURF_GUIDE_LINE_STYLE },
           { type: 'line', x0: 0, x1: periodLimit, y0: surfEnergy, y1: surfEnergy, line: SURF_GUIDE_LINE_STYLE },
-          ...swellRedLines
+          ...swellRankLines
         ],
         annotations: [
           {
@@ -896,7 +1027,8 @@
             xanchor: 'right',
             yanchor: 'bottom',
             font: { color: 'green', size: 10, weight: 'bold' }
-          }
+          },
+          ...swellAnnotations
         ],
         autosize: true
       };
@@ -922,10 +1054,10 @@
       }];
 
       const heatmapLayout = {
-        title: { text: `Spectral Density Heatmap Over Time<br><span style="font-size:11px;color:#555">Active Frame: ${currentTimeStr}</span>`, font: { size: 13 } },
+        title: { text: `Spectral Density Heatmap Over Time — <span style="font-size:11px;color:#555">Active Frame: ${currentTimeStr}</span>`, font: { size: 13 } },
         xaxis: { title: 'Timeline Index' },
         yaxis: { title: 'Period (s)', range: [0, periodLimit] },
-        margin: { t: 50, b: 40, l: 40, r: 20 },
+        margin: { t: 40, b: 40, l: 40, r: 20 },
         autosize: true,
         shapes: [
           {
@@ -945,8 +1077,13 @@
     }
 
     /* =====================================================================
-       PLAYBACK CONTROLS
+       PLAYBACK CONTROLS & SPEED
        ===================================================================== */
+    function getPlaybackInterval() {
+      const speedSelect = document.getElementById('speedSelect');
+      return speedSelect ? parseInt(speedSelect.value) : PLAYBACK_INTERVAL_MS;
+    }
+
     function togglePlay() {
       isPlaying ? pause() : play();
     }
@@ -954,17 +1091,23 @@
     function play() {
       isPlaying = true;
       document.getElementById('playBtn').innerText = "⏸ Pause";
+      if (playInterval) clearInterval(playInterval);
+
       playInterval = setInterval(() => {
         currentFrameIdx = (currentFrameIdx >= timeSeriesData.length - 1) ? 0 : currentFrameIdx + 1;
         document.getElementById('timeSlider').value = currentFrameIdx;
         renderCurrentFrame();
-      }, PLAYBACK_INTERVAL_MS);
+      }, getPlaybackInterval());
     }
 
     function pause() {
       isPlaying = false;
       document.getElementById('playBtn').innerText = "▶ Play";
       if (playInterval) clearInterval(playInterval);
+    }
+
+    function onSpeedChange() {
+      if (isPlaying) play();
     }
 
     function stepFrame(dir) {
@@ -993,6 +1136,40 @@
       currentFrameIdx = parseInt(val);
       renderCurrentFrame();
     }
+
+    /* =====================================================================
+       KEYBOARD SHORTCUTS
+       ===================================================================== */
+    document.addEventListener('keydown', (event) => {
+      // Avoid triggering hotkeys when typing in input/text fields
+      const activeElement = document.activeElement;
+      if (activeElement && (activeElement.tagName === 'INPUT' || activeElement.tagName === 'SELECT')) {
+        return;
+      }
+
+      switch (event.code) {
+        case 'Space':
+          event.preventDefault();
+          togglePlay();
+          break;
+        case 'ArrowLeft':
+          event.preventDefault();
+          stepFrame(-1);
+          break;
+        case 'ArrowRight':
+          event.preventDefault();
+          stepFrame(1);
+          break;
+        case 'Home':
+          event.preventDefault();
+          firstFrame();
+          break;
+        case 'End':
+          event.preventDefault();
+          lastFrame();
+          break;
+      }
+    });
 
     /* =====================================================================
        INIT
