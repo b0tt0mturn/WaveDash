@@ -211,7 +211,7 @@
 </head>
 <body>
 
-  <h2>🌊 Wave Dash - Live Interactive Spectral Analysis</h2>
+  <h2>🌊 Wave Dash</h2>
 
   <div class="grid-container">
     <div class="panel">
@@ -251,17 +251,17 @@
             </div>
 
             <div class="control-group">
-              <label>Min Plot Limit (m²/Hz):</label>
+              <label>Axis Limit (m²/Hz):</label>
               <input type="number" step="0.1" id="minYLimit" value="2.0" min="0.1">
             </div>
 
             <div class="control-group">
-              <label>Worthy Swell Energy:</label>
+              <label>Worthy Energy:</label>
               <input type="number" step="0.1" id="surfEnergy" value="1.0">
             </div>
 
             <div class="control-group">
-              <label>Worthy Swell Period (s):</label>
+              <label>Worthy Period (s):</label>
               <input type="number" id="surfPeriod" value="9">
             </div>
 
@@ -342,9 +342,9 @@
 
     const afmhotYellowCap = [
       [0.0, '#000000'],
-      [0.25, '#660000'],
+      [0.2, '#660000'],
       [0.5, '#CC3300'],
-      [0.75, '#FF6600'],
+      [0.8, '#FF6600'],
       [1.0, '#FFFF80']
     ];
 
