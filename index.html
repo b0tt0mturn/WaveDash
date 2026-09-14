@@ -167,14 +167,27 @@
 
     .legend-bar {
       display: flex;
-      flex-wrap: wrap;
-      justify-content: flex-start;
-      gap: 8px 15px;
+      flex-direction: column;
+      gap: 6px;
       margin-top: 10px;
       padding: 6px;
       background: #f8f9fa;
       border-radius: 6px;
       border: 1px solid #e9ecef;
+    }
+    /* Wind (grade + Effective Wind) and swells are two separate rows so one
+       never wraps into the other on narrow/phone widths — each row wraps
+       within itself if it still doesn't fit. min-height keeps each row the
+       same height whether it holds a color-box item or just the plain-text
+       placeholder shown when there's no wind/swell data, so the legend's
+       total height — and everything below it — never jumps between frames. */
+    .legend-row {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-start;
+      align-items: center;
+      gap: 8px 15px;
+      min-height: 16px;
     }
     .legend-item {
       display: flex;
@@ -200,6 +213,24 @@
       height: 12px;
       border-radius: 3px;
       display: inline-block;
+    }
+    /* Swell items are tappable (see toggleSwellDetail) — title="" still gives
+       mouse users a native hover tooltip; the pointer cursor signals the tap
+       affordance for touch users, who have no hover state to rely on. */
+    .legend-item-tappable {
+      cursor: pointer;
+    }
+    .swell-detail-box {
+      font-size: 11px;
+      font-weight: normal;
+      color: #333;
+      background: #fff;
+      border-left: 3px solid #888;
+      border-radius: 3px;
+      padding: 4px 8px;
+      width: fit-content;
+      max-width: 100%;
+      box-sizing: border-box;
     }
 
     .plots-grid { 
@@ -469,6 +500,12 @@
     let windTimeSeriesMap = new Map();
     let currentFrameIdx = 0;
     let isPlaying = false;
+    // Swell legend tap-to-show detail (mobile has no hover, so the title-attribute
+    // tooltip alone doesn't reach phones — see toggleSwellDetail). Rebuilt by every
+    // updateSwellLegend() call; openSwellDetailIndex resets on each rebuild so a
+    // stale popover can't linger across a frame change.
+    let currentSwellDetails = [];
+    let openSwellDetailIndex = null;
     let playInterval = null;
     let mapMarkersGroup = null;
     let tideMarkerGroup = null; // separate layer group so renderBuoysOnMap's clearLayers() never wipes the tide marker
@@ -1227,38 +1264,55 @@
     // no wind data for this frame.
     function updateSwellLegend(clusters, effectiveWind, windGrade) {
       const legendContainer = document.getElementById('swellLegend');
-      let html = '';
 
-      // Good/Fair/Poor assessment, then Effective Wind (same color), then the
-      // swells — left-justified (see .legend-bar).
+      // Wind (Good/Fair/Poor assessment, then Effective Wind, same color) and
+      // swells are built as two separate rows (see .legend-row) so wind never
+      // wraps onto the same line as swells, or vice versa, on narrow screens.
+      // The wind row is ALWAYS rendered, even with no wind data, with a muted
+      // placeholder in its place (matching the swell row's own "none" message) —
+      // otherwise the legend loses a whole row of height when wind is missing,
+      // and everything below it (the plots) jumps up to fill the gap.
+      let windRow = '';
       if (windGrade) {
-        html += `
+        windRow += `
           <div class="legend-item legend-wind-grade">
             <span style="color: ${windGrade.color};">${windGrade.label}</span>
           </div>
         `;
       }
-
       if (effectiveWind !== null && effectiveWind !== undefined) {
-        html += `
+        windRow += `
           <div class="legend-item legend-wind">
             <span class="legend-color-box" style="background-color: ${(windGrade && windGrade.color) || WIND_GRADE_COLORS.fair};"></span>
             <span>Effective Wind: ${effectiveWind.toFixed(1)} kts</span>
           </div>
         `;
       }
+      if (!windRow) {
+        windRow = '<span style="font-size:11px;color:#888;">No wind data available.</span>';
+      }
 
+      // Each swell's detail text is the same as its polar-plot bubble's hovertext
+      // (see the Swell Markers trace below), so hovering either one — or tapping
+      // the legend item on a touch device, via toggleSwellDetail() — says the same
+      // thing. Every rebuild starts a fresh detail list and closes any open popover,
+      // since it belonged to the previous frame's swells.
+      currentSwellDetails = clusters.map((c, i) => ({
+        text: `Swell ${i + 1}: ${c.energy.toFixed(2)} m²/Hz @ ${c.period.toFixed(1)}s`,
+        color: SWELL_RANK_COLORS[i % SWELL_RANK_COLORS.length]
+      }));
+      openSwellDetailIndex = null;
+
+      let swellRow = '';
       if (clusters.length === 0) {
-        html += '<span style="font-size:11px;color:#888;">No prominent swells detected above threshold.</span>';
+        swellRow += '<span style="font-size:11px;color:#888;">No prominent swells detected above threshold.</span>';
       } else {
         for (let i = 0; i < clusters.length; i++) {
-          const c = clusters[i];
-          const color = SWELL_RANK_COLORS[i % SWELL_RANK_COLORS.length];
-          // Same text as the matching polar-plot bubble's hovertext (see the
-          // Swell Markers trace below) so hovering either one tells you the same thing.
-          const hoverText = `Swell ${i + 1}: ${c.energy.toFixed(2)} m²/Hz @ ${c.period.toFixed(1)}s`;
-          html += `
-            <div class="legend-item" title="${hoverText}">
+          const { text: hoverText, color } = currentSwellDetails[i];
+          // title="" keeps the native hover tooltip for mouse users; onclick covers
+          // touch devices, which have no hover state for title to key off of.
+          swellRow += `
+            <div class="legend-item legend-item-tappable" title="${hoverText}" onclick="toggleSwellDetail(${i})">
               <span class="legend-color-box" style="background-color: ${color};"></span>
               <span>Swell ${i + 1}</span>
             </div>
@@ -1266,7 +1320,39 @@
         }
       }
 
+      // Both rows are always emitted (windRow always has content by this point,
+      // even if it's just the placeholder) so the legend's total height never
+      // changes based on what data happens to be present this frame.
+      let html = '';
+      html += `<div class="legend-row legend-row-wind">${windRow}</div>`;
+      html += `<div class="legend-row legend-row-swell">${swellRow}</div>`;
+      if (clusters.length > 0) {
+        html += `<div id="swellDetailBox" class="swell-detail-box" hidden></div>`;
+      }
+
       legendContainer.innerHTML = html;
+    }
+
+    // Tap-to-show detail for a swell legend item (see updateSwellLegend). Tapping
+    // the same swell again closes it; tapping a different one switches to it.
+    function toggleSwellDetail(i) {
+      const box = document.getElementById('swellDetailBox');
+      if (!box) return;
+
+      if (openSwellDetailIndex === i) {
+        openSwellDetailIndex = null;
+        box.hidden = true;
+        box.innerText = '';
+        box.style.borderLeftColor = '';
+        return;
+      }
+
+      const detail = currentSwellDetails[i];
+      if (!detail) return;
+      openSwellDetailIndex = i;
+      box.hidden = false;
+      box.innerText = detail.text;
+      box.style.borderLeftColor = detail.color;
     }
 
     function renderCurrentFrame() {
