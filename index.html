@@ -1040,7 +1040,7 @@
 
     function renderHeatmap({ globalYMax, periodLimit, surfPeriod, currentTimeStr }) {
       const yValues = timeSeriesData[0].frequencies.map(f => 1 / f);
-      const xValues = timeSeriesData.map((_, idx) => ` ${idx}`);
+      const xValues = timeSeriesData.map((_, idx) => `Hr ${idx}`);
       const zValues = yValues.map((_, j) => timeSeriesData.map(frame => frame.energy[j]));
 
       const heatmapData = [{
