@@ -305,18 +305,18 @@
             </div>
 
             <div class="control-group">
-              <label>Swell Detection Thresh (m²/Hz):</label>
+              <label>Swell Thresh (m²/Hz):</label>
               <input type="number" step="0.05" id="peakThreshold" value="0.1">
             </div>
 
             <div class="control-group">
               <label>Beach Angle (°):</label>
-              <input type="number" id="beachAngle" value="135" min="0" max="360">
+              <input type="number" id="beachAngle" value="120" min="0" max="360">
               <select id="beachAnglePreset" class="beach-angle-preset" onchange="applyBeachAnglePreset(this.value)">
                 <option value="" selected>Presets…</option>
-                <option value="120">120°</option>
-                <option value="205">205°</option>
-                <option value="240">240°</option>
+                <option value="120">120° LH</option>
+                <option value="205">205° PP</option>
+                <option value="240">240° GM</option>
               </select>
             </div>
 
