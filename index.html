@@ -105,13 +105,17 @@
       margin-bottom: 2px; 
       white-space: nowrap;
     }
-    .control-group input, .control-group select { 
-      width: 100%; 
-      padding: 4px 6px; 
-      box-sizing: border-box; 
+    .control-group input, .control-group select {
+      width: 100%;
+      padding: 4px 6px;
+      box-sizing: border-box;
       border: 1px solid #ccc;
       border-radius: 4px;
       font-size: 11px;
+    }
+    .beach-angle-preset {
+      margin-top: 3px;
+      cursor: pointer;
     }
 
     .btn { 
@@ -163,8 +167,9 @@
 
     .legend-bar {
       display: flex;
-      justify-content: center;
-      gap: 15px;
+      flex-wrap: wrap;
+      justify-content: flex-start;
+      gap: 8px 15px;
       margin-top: 10px;
       padding: 6px;
       background: #f8f9fa;
@@ -179,6 +184,17 @@
       font-weight: bold;
       color: #333;
     }
+    /* Fixed width so the swell entries after it don't shift left/right as the
+       Effective Wind value's digit count changes from frame to frame. */
+    .legend-item.legend-wind {
+      width: 170px;
+      flex: 0 0 auto;
+    }
+    /* Good/Fair/Poor assessment, just before the Effective Wind entry. */
+    .legend-item.legend-wind-grade {
+      width: 40px;
+      flex: 0 0 auto;
+    }
     .legend-color-box {
       width: 12px;
       height: 12px;
@@ -191,9 +207,27 @@
       flex-direction: column; 
       gap: 20px; 
     }
-    .plot-box { 
-      height: 270px; 
+    .plot-box {
+      height: 270px;
       width: 100%;
+    }
+    .tide-toggle-row {
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+      font-size: 12px;
+      font-weight: bold;
+      color: #333;
+    }
+    .tide-toggle-row label {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      cursor: pointer;
+    }
+    .tide-toggle-row input[type="checkbox"] {
+      width: auto;
+      cursor: pointer;
     }
 
     @media (min-width: 768px) {
@@ -270,9 +304,20 @@
               <input type="number" id="critAngle" value="120">
             </div>
 
-            <div class="control-group span-full">
+            <div class="control-group">
               <label>Swell Detection Thresh (m²/Hz):</label>
               <input type="number" step="0.05" id="peakThreshold" value="0.1">
+            </div>
+
+            <div class="control-group">
+              <label>Beach Angle (°):</label>
+              <input type="number" id="beachAngle" value="135" min="0" max="360">
+              <select id="beachAnglePreset" class="beach-angle-preset" onchange="applyBeachAnglePreset(this.value)">
+                <option value="" selected>Presets…</option>
+                <option value="120">120°</option>
+                <option value="205">205°</option>
+                <option value="240">240°</option>
+              </select>
             </div>
 
           </div>
@@ -312,6 +357,9 @@
       <div class="plots-grid" style="margin-top: 15px;">
         <div id="polarPlot" class="plot-box"></div>
         <div id="spectralPlot" class="plot-box"></div>
+        <div class="tide-toggle-row full-width">
+          <label><input type="checkbox" id="showTide" onchange="onShowTideToggle()"> Show Tide</label>
+        </div>
         <div id="heatmapPlot" class="plot-box full-width"></div>
       </div>
     </div>
@@ -330,6 +378,21 @@
     const PEAK_DETECT_MIN_FREQ_HZ = 0.05;
     const PEAK_DETECT_MAX_FREQ_HZ = 0.20;
     const MPS_TO_KNOTS = 1.94384;
+    // Heatmap x-axis: show at most this many tick labels. One hourly tick per
+    // column reads fine for a day or less (<=24 columns, the common case); past
+    // that, ticks are thinned to an even hour-step so labels stop bunching up
+    // instead of growing denser with every extra hour plotted.
+    const MAX_HEATMAP_TICKS = 24;
+
+    // NOAA CO-OPS API (tide predictions), routed through the same proxy worker
+    // as the NDBC buoy requests above — see buildProxyUrl().
+    const TIDE_STATIONS_URL = "https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations.json?type=tidepredictions";
+    const TIDE_PREDICTIONS_URL = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter";
+    // Padding added on each side of the plotted window when requesting hi/lo
+    // predictions, so there's always a bracketing tide event to interpolate from
+    // at both edges of the chart (a semidiurnal cycle is ~12.4h, so 24h is safe).
+    const TIDE_QUERY_PADDING_MS = 24 * 60 * 60 * 1000;
+    const TIDE_LINE_COLOR = 'rgb(91, 155, 213)'; // same ocean-blue hue as WATER_COLOR, full opacity for line visibility
 
     const SWELL_RANK_COLORS = ['#e6194B', '#3cb44b', '#ffe119', '#4363d8']; 
 
@@ -337,8 +400,50 @@
       periodLimit: 18,
       minYLimit: 2.0,
       surfEnergy: 1.0,
-      surfPeriod: 9
+      surfPeriod: 9,
+      beachAngle: 135
     };
+
+    // Wind quality cutoffs (Effective Wind, kts): below "Clean" reads green,
+    // between "Clean" and "Poor" reads orange (fair), at/above "Poor" reads red.
+    // Onshore is flat regardless of exact angle; the offshore side is linearly
+    // interpolated through the 45°-offshore anchor down to dead offshore. See
+    // getWindQualityCutoffs() for how these three anchors are blended.
+    //
+    // Not user-editable in the UI by design — these are tuned in code as
+    // experience/feedback comes in, rather than exposed as controls.
+    const WIND_GRADE_CUTOFFS = {
+      onshoreClean: 4,
+      onshoreFair: 7,
+      off45Clean: 8,
+      off45Fair: 16,
+      deadOffClean: 12,
+      deadOffFair: 20
+    };
+
+    // Status colors (validated via the dataviz skill's palette checker) —
+    // reserved for this good/fair/poor read and never reused as a categorical
+    // series color. "fair" is a darker burnt-amber (not the more typical bright
+    // caution-orange) specifically so the wind arrow reads clearly against the
+    // WATER_COLOR/SAND_COLOR polar backgrounds — validated at 4.95:1 contrast
+    // vs the water half and 5.43:1 vs the sand half (both clear the 3:1 floor;
+    // the original bright orange was 1.11:1 / 1.22:1), while still passing CVD
+    // separation and the normal-vision floor against clean/poor.
+    const WIND_GRADE_COLORS = {
+      clean: '#0ca30c', // good
+      fair: '#7a4008',  // caution
+      poor: '#d03b3b'   // critical
+    };
+
+    // Wind speed label on the polar plot: fixed black regardless of grade color,
+    // so it reads clearly against both the water and sand backgrounds.
+    const WIND_LABEL_COLOR = '#000000';
+
+    // Validated with the dataviz skill's palette checker (CVD delta-E 18.6, normal-vision
+    // delta-E 22.7 — well clear of the safe floors) so the two halves stay distinguishable
+    // for colorblind viewers, not just by eye.
+    const WATER_COLOR = 'rgba(91, 155, 213, 0.5)';   // ocean blue
+    const SAND_COLOR = 'rgba(217, 165, 102, 0.55)';  // beach tan
 
     const afmhotYellowCap = [
       [0.0, '#000000'],
@@ -366,6 +471,18 @@
     let isPlaying = false;
     let playInterval = null;
     let mapMarkersGroup = null;
+    let tideMarkerGroup = null; // separate layer group so renderBuoysOnMap's clearLayers() never wipes the tide marker
+
+    // Tide overlay state (heatmap only). currentBuoyLocation is set whenever the
+    // wave buoy resolves (see updateDynamicBuoyDatabase) so the Show Tide toggle
+    // can look up the nearest tide station even if flipped after the fact, without
+    // needing a fresh Update click. tideStationListCache/nearestTideStationCache
+    // avoid re-fetching NOAA's full (multi-thousand-station) list on every use.
+    let currentBuoyLocation = null;
+    let tideStationListCache = null;
+    const nearestTideStationCache = new Map();
+    let tideData = null; // [{ utcMs, height }, ...] sorted ascending, or null if unavailable
+    let resolvedTideStation = null; // { id, name, lat, lon, distanceMiles } for the station tideData came from, or null
 
     const fallbackBuoyDatabase = [
       { id: "41159", name: "41159 - Onslow Bay Outer, NC", lat: 34.211, lon: -76.944 },
@@ -382,19 +499,82 @@
     ];
 
     /* =====================================================================
-       COLOR GENERATOR
+       WIND METRICS
        ===================================================================== */
-    function getWindColor(speedKts) {
-      const norm = Math.min(Math.max(speedKts / 8.0, 0.0), 1.0);
-      const r = Math.round(255 * norm);
-      const g = Math.round(180 * (1 - norm));
-      const b = 0;
-      return `rgb(${r},${g},${b})`;
+    // Effective Wind = Mean Wind + (Gust - Mean Wind) / 3
+    // The sustained/mean wind speed, nudged up by a third of the gust's excess
+    // over the mean — so gustier conditions read as a higher effective wind
+    // even when the mean speed alone is the same.
+    function calculateEffectiveWind(wind) {
+      if (!wind) return null;
+      return wind.speedKts + (wind.gustKts - wind.speedKts) / 3;
+    }
+
+    // Smallest angle (0-180°) between two compass bearings.
+    function angularDistance(a, b) {
+      const diff = Math.abs(a - b) % 360;
+      return diff > 180 ? 360 - diff : diff;
+    }
+
+    // 0° = dead offshore (wind blows straight out to sea, along the beach's
+    // seaward bearing). 180° = dead onshore (wind blows straight in at the beach).
+    // landFacingAngle is the bearing wind comes FROM when it's dead offshore —
+    // i.e. Beach Angle + 180° (see the water/sand background comment above).
+    function getOffshoreAngle(windFromDir, landFacingAngle) {
+      return angularDistance(windFromDir, landFacingAngle);
+    }
+
+    // Blends the three configured anchor points (onshore / 45°-offshore / dead
+    // offshore) into a Clean/Poor cutoff pair for the wind's actual angle.
+    // Onshore is flat (any onshore angle uses the same cutoffs); the offshore
+    // side linearly interpolates in two segments through the 45° anchor.
+    function getWindQualityCutoffs(offAngle, g) {
+      if (offAngle >= 90) {
+        return { clean: g.onshoreClean, fair: g.onshoreFair };
+      }
+      if (offAngle <= 45) {
+        const t = offAngle / 45; // 0 at dead offshore -> 1 at 45° offshore
+        return {
+          clean: g.deadOffClean + (g.off45Clean - g.deadOffClean) * t,
+          fair: g.deadOffFair + (g.off45Fair - g.deadOffFair) * t
+        };
+      }
+      const t = (offAngle - 45) / 45; // 0 at 45° offshore -> 1 at onshore boundary
+      return {
+        clean: g.off45Clean + (g.onshoreClean - g.off45Clean) * t,
+        fair: g.off45Fair + (g.onshoreFair - g.off45Fair) * t
+      };
+    }
+
+    // Shared grading logic: Effective Wind graded against the direction-dependent
+    // Clean/Poor cutoffs, returned as a { label, color } pair. "clean"/"poor" are
+    // the internal cutoff names (see WIND_GRADE_CUTOFFS); the user-facing labels
+    // are Good/Fair/Poor.
+    function getWindGradeInfo(effectiveWind, windFromDir, landFacingAngle, gradeCutoffs) {
+      const offAngle = getOffshoreAngle(windFromDir, landFacingAngle);
+      const { clean, fair } = getWindQualityCutoffs(offAngle, gradeCutoffs);
+      if (effectiveWind < clean) return { label: 'Good', color: WIND_GRADE_COLORS.clean };
+      if (effectiveWind < fair) return { label: 'Fair', color: WIND_GRADE_COLORS.fair };
+      return { label: 'Poor', color: WIND_GRADE_COLORS.poor };
+    }
+
+    // The single entry point for wind color alone (used by the wind stem/arrowhead,
+    // which don't need the label) — a thin wrapper over getWindGradeInfo.
+    function getWindGradeColor(effectiveWind, windFromDir, landFacingAngle, gradeCutoffs) {
+      return getWindGradeInfo(effectiveWind, windFromDir, landFacingAngle, gradeCutoffs).color;
     }
 
     /* =====================================================================
        CONTROL PANEL HELPERS
        ===================================================================== */
+    // Plain `|| DEFAULTS.x` (still used above for a few legacy fields) silently
+    // discards a user-entered 0, which is a valid value for several of these
+    // fields (e.g. a due-north Beach Angle) — so this checks for NaN explicitly.
+    function parseNumOrDefault(elementId, defaultValue) {
+      const v = parseFloat(document.getElementById(elementId).value);
+      return Number.isNaN(v) ? defaultValue : v;
+    }
+
     function getUserSettings() {
       return {
         stationId: document.getElementById('stationId').value.trim(),
@@ -406,12 +586,30 @@
         surfEnergy: parseFloat(document.getElementById('surfEnergy').value) || DEFAULTS.surfEnergy,
         surfPeriod: parseFloat(document.getElementById('surfPeriod').value) || DEFAULTS.surfPeriod,
         critAngle: parseFloat(document.getElementById('critAngle').value),
-        peakThreshold: parseFloat(document.getElementById('peakThreshold').value)
+        peakThreshold: parseFloat(document.getElementById('peakThreshold').value),
+        beachAngle: parseNumOrDefault('beachAngle', DEFAULTS.beachAngle),
+        // Not read from the UI — see the WIND_GRADE_CUTOFFS constant.
+        windGradeCutoffs: WIND_GRADE_CUTOFFS
       };
     }
 
     function buildProxyUrl(targetUrl) {
       return `${WORKER_URL}?url=${encodeURIComponent(targetUrl)}`;
+    }
+
+    // The preset dropdown is just a shortcut into the Beach Angle number field —
+    // the number field stays the single source of truth, so free-text entry still
+    // works exactly as before. Picking a preset fills it in and, if data is already
+    // loaded, re-renders immediately (no need to re-fetch — Beach Angle only affects
+    // the polar plot's background coloring). The select resets to its placeholder
+    // right after so it never looks "stuck" on a preset once the number is hand-edited.
+    function applyBeachAnglePreset(value) {
+      if (!value) return;
+      document.getElementById('beachAngle').value = value;
+      document.getElementById('beachAnglePreset').value = '';
+      if (timeSeriesData.length) {
+        renderCurrentFrame();
+      }
     }
 
     /* =====================================================================
@@ -432,6 +630,13 @@
         hour: '2-digit', minute: '2-digit', hour12: false, timeZoneName: 'short'
       });
       return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute} ${p.timeZoneName}`;
+    }
+
+    function getETHourLabel(formattedTimestamp) {
+      // formattedTimestamp is produced by formatToET(): "YYYY-MM-DD HH:MM TZ"
+      // Extract just the 2-digit 24-hour hour, e.g. "14".
+      const timePart = formattedTimestamp.split(' ')[1] || '';
+      return timePart.split(':')[0] || '';
     }
 
     function setDefaultStartDate() {
@@ -462,6 +667,7 @@
       }).addTo(map);
 
       mapMarkersGroup = L.layerGroup().addTo(map);
+      tideMarkerGroup = L.layerGroup().addTo(map);
     }
 
     function getDistanceMiles(lat1, lon1, lat2, lon2) {
@@ -528,6 +734,29 @@
       map.setView([targetBuoy.lat, targetBuoy.lon], map.getZoom());
     }
 
+    // Marks the NOAA tide-prediction station the heatmap's tide overlay is
+    // currently using (see TIDE OVERLAY section below). Lives in its own layer
+    // group, separate from mapMarkersGroup, so a buoy-list re-render (which
+    // clears mapMarkersGroup) never wipes it out. Pass null to clear it, e.g.
+    // when the Show Tide toggle is switched off.
+    function renderTideStationMarker(station) {
+      if (!map || !tideMarkerGroup) return;
+      tideMarkerGroup.clearLayers();
+      if (!station) return;
+
+      const marker = L.circleMarker([station.lat, station.lon], {
+        radius: 8,
+        color: '#ffffff',
+        fillColor: TIDE_LINE_COLOR,
+        fillOpacity: 1,
+        weight: 2.5,
+        interactive: true
+      }).addTo(tideMarkerGroup);
+
+      marker.bindTooltip(`Tide: ${station.name}`, { permanent: false, direction: 'top', offset: [0, -8] });
+      marker.bindPopup(`<b>Tide Station ${station.id}</b><br>${station.name}<br>Distance from buoy: ${station.distanceMiles.toFixed(1)} miles`);
+    }
+
     function setMapStation(id, type) {
       if (type === 'wave') {
         document.getElementById('stationId').value = id;
@@ -540,6 +769,9 @@
     /* =====================================================================
        NOAA DATA FETCHING
        ===================================================================== */
+    // Returns the resolved { lat, lon } of activeStationId (also stashed in
+    // currentBuoyLocation, since the tide overlay needs it later — after this
+    // call returns, e.g. when the user flips the Show Tide toggle post-fetch).
     async function updateDynamicBuoyDatabase(activeStationId) {
       const targetUrl = "https://www.ndbc.noaa.gov/activestations.xml";
 
@@ -571,6 +803,8 @@
 
         if (!targetBuoy) throw new Error("Target buoy not found in active XML list.");
         renderBuoysOnMap(allStations, targetBuoy);
+        currentBuoyLocation = { lat: targetBuoy.lat, lon: targetBuoy.lon };
+        return currentBuoyLocation;
 
       } catch (err) {
         console.warn("Using fallback local database for markers:", err);
@@ -579,6 +813,8 @@
           { id: searchId, name: `Station ${searchId}`, lat: 34.211, lon: -76.944 };
 
         renderBuoysOnMap(fallbackBuoyDatabase, targetBuoy);
+        currentBuoyLocation = { lat: targetBuoy.lat, lon: targetBuoy.lon };
+        return currentBuoyLocation;
       }
     }
 
@@ -747,13 +983,209 @@
         slider.value = timeSeriesData.length - 1;
         currentFrameIdx = timeSeriesData.length - 1;
 
+        // Tide overlay is optional and best-effort: its own try/catch keeps a
+        // failure here (e.g. the proxy not allowing the NOAA tides domain
+        // through) from blocking the wave/wind data that already succeeded.
+        let tideErrorMsg = null;
+        if (document.getElementById('showTide').checked) {
+          status.innerText = "Loading tide data...";
+          try {
+            await loadTideDataForCurrentWindow();
+          } catch (tErr) {
+            tideData = null;
+            resolvedTideStation = null;
+            renderTideStationMarker(null);
+            tideErrorMsg = tErr.message;
+            console.warn("Tide overlay unavailable:", tErr);
+          }
+        } else {
+          tideData = null;
+          resolvedTideStation = null;
+          renderTideStationMarker(null);
+        }
+
         renderCurrentFrame();
-        status.innerText = windErrorMsg ? `Wave data updated (Wind warning: ${windErrorMsg})` : "Updated successfully.";
+        const notes = [windErrorMsg && `Wind warning: ${windErrorMsg}`, tideErrorMsg && `Tide warning: ${tideErrorMsg}`]
+          .filter(Boolean).join(' | ');
+        status.innerText = notes ? `Wave data updated (${notes})` : "Updated successfully.";
 
       } catch (err) {
         status.innerText = "Fetch error.";
         alert("Error fetching buoy or dynamic metadata: " + err.message);
       }
+    }
+
+    /* =====================================================================
+       TIDE OVERLAY (heatmap only)
+       ===================================================================== */
+    // Reconstructs the exact UTC instant a formatToET() string represents.
+    // formatToET always renders with timeZoneName:'short', so the trailing
+    // token is reliably "EDT" (UTC-4) or "EST" (UTC-5) — no DST ambiguity to
+    // resolve, since the abbreviation already tells us which is in effect.
+    function parseETTimestampToUTC(formattedTimestamp) {
+      const [datePart, timePart, tz] = formattedTimestamp.split(' ');
+      const [y, m, d] = datePart.split('-').map(Number);
+      const [hh, mm] = timePart.split(':').map(Number);
+      const offsetHours = tz === 'EDT' ? 4 : 5;
+      return Date.UTC(y, m - 1, d, hh, mm) + offsetHours * 3600000;
+    }
+
+    function formatNOAADateUTC(utcMs) {
+      const d = new Date(utcMs);
+      const y = d.getUTCFullYear();
+      const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+      const day = String(d.getUTCDate()).padStart(2, '0');
+      return `${y}${m}${day}`;
+    }
+
+    // Finds the closest NOAA tide-prediction station to a lat/lon, reusing the
+    // same haversine distance function as the buoy map. The full station list
+    // (a few thousand entries, global) is fetched once and cached; the resolved
+    // nearest station per location is cached too, since it never changes for a
+    // given wave buoy.
+    async function findNearestTideStation(lat, lon) {
+      const cacheKey = `${lat.toFixed(3)},${lon.toFixed(3)}`;
+      if (nearestTideStationCache.has(cacheKey)) return nearestTideStationCache.get(cacheKey);
+
+      if (!tideStationListCache) {
+        const response = await fetch(buildProxyUrl(TIDE_STATIONS_URL));
+        if (!response.ok) throw new Error(`HTTP ${response.status} fetching tide station list`);
+        const json = await response.json();
+        tideStationListCache = (json.stations || []).filter(s => isFinite(s.lat) && isFinite(s.lng));
+        if (tideStationListCache.length === 0) throw new Error("Tide station list was empty");
+      }
+
+      let nearest = null;
+      let nearestDist = Infinity;
+      for (const s of tideStationListCache) {
+        const dist = getDistanceMiles(lat, lon, s.lat, s.lng);
+        if (dist < nearestDist) {
+          nearestDist = dist;
+          nearest = { id: s.id, name: s.name, lat: s.lat, lon: s.lng, distanceMiles: dist };
+        }
+      }
+
+      if (nearest) nearestTideStationCache.set(cacheKey, nearest);
+      return nearest;
+    }
+
+    // Fetches high/low tide predictions (not the full 6-minute curve — we only
+    // need the extrema; see interpolateTideHeight for how the smooth shape
+    // between them is reconstructed) for a window padded around what's currently
+    // plotted, and populates the module-level tideData used by renderHeatmap().
+    async function loadTideDataForCurrentWindow() {
+      if (!currentBuoyLocation) throw new Error("No wave buoy location resolved yet");
+      if (!timeSeriesData.length) throw new Error("No wave data loaded yet");
+
+      const station = await findNearestTideStation(currentBuoyLocation.lat, currentBuoyLocation.lon);
+      if (!station) throw new Error("No nearby tide station found");
+
+      const earliestUTC = parseETTimestampToUTC(timeSeriesData[0].timestamp);
+      const latestUTC = parseETTimestampToUTC(timeSeriesData[timeSeriesData.length - 1].timestamp);
+      const beginDate = formatNOAADateUTC(earliestUTC - TIDE_QUERY_PADDING_MS);
+      const endDate = formatNOAADateUTC(latestUTC + TIDE_QUERY_PADDING_MS);
+
+      const targetUrl = `${TIDE_PREDICTIONS_URL}?product=predictions&application=WaveDash` +
+        `&begin_date=${beginDate}&end_date=${endDate}&datum=MLLW&station=${station.id}` +
+        `&time_zone=gmt&units=english&interval=hilo&format=json`;
+
+      const response = await fetch(buildProxyUrl(targetUrl));
+      if (!response.ok) throw new Error(`HTTP ${response.status} fetching tide predictions for station ${station.id}`);
+
+      const json = await response.json();
+      if (json.error) throw new Error(json.error.message || "NOAA tide API returned an error");
+      if (!json.predictions || json.predictions.length < 2) {
+        throw new Error(`Not enough tide predictions returned for station ${station.id}`);
+      }
+
+      tideData = json.predictions
+        .map(p => ({ utcMs: Date.parse(p.t.replace(' ', 'T') + 'Z'), height: parseFloat(p.v) }))
+        .filter(p => isFinite(p.utcMs) && isFinite(p.height))
+        .sort((a, b) => a.utcMs - b.utcMs);
+
+      if (tideData.length < 2) throw new Error("Tide predictions failed to parse");
+
+      resolvedTideStation = station;
+      renderTideStationMarker(resolvedTideStation);
+    }
+
+    // Raised-cosine interpolation between the two bracketing hi/lo events — the
+    // standard smooth approximation of a semidiurnal tide curve between known
+    // extrema, which is exactly the shape we want without needing 6-minute data.
+    function interpolateTideHeight(utcMs, tidePoints) {
+      if (!tidePoints || tidePoints.length < 2) return null;
+      if (utcMs <= tidePoints[0].utcMs) return tidePoints[0].height;
+      if (utcMs >= tidePoints[tidePoints.length - 1].utcMs) return tidePoints[tidePoints.length - 1].height;
+
+      for (let i = 0; i < tidePoints.length - 1; i++) {
+        const a = tidePoints[i], b = tidePoints[i + 1];
+        if (utcMs >= a.utcMs && utcMs <= b.utcMs) {
+          const t = (utcMs - a.utcMs) / (b.utcMs - a.utcMs);
+          return a.height + (b.height - a.height) * (1 - Math.cos(t * Math.PI)) / 2;
+        }
+      }
+      return null;
+    }
+
+    // Builds the tide overlay trace for the heatmap: one interpolated height per
+    // existing hourly column (so it rides the same categorical x-axis as the
+    // heatmap — no separate axis needed), min-max scaled into the period-limit
+    // range purely for visual placement. Unitless by design: we only care about
+    // relative high/low and rising/falling, never an exact value (per the ask).
+    function buildTideOverlayTrace(xValues, periodLimit) {
+      if (!tideData || tideData.length < 2) return null;
+
+      const heights = xValues.map(ts => interpolateTideHeight(parseETTimestampToUTC(ts), tideData));
+      if (heights.some(h => h === null || !isFinite(h))) return null;
+
+      const minH = Math.min(...heights);
+      const maxH = Math.max(...heights);
+      const range = (maxH - minH) || 1; // guard a degenerate/flat window
+      const margin = periodLimit * 0.08; // inset from the very top/bottom axis edges
+      const usableRange = Math.max(periodLimit - margin * 2, 0);
+      const scaledY = heights.map(h => margin + ((h - minH) / range) * usableRange);
+
+      return {
+        type: 'scatter',
+        mode: 'lines',
+        x: xValues,
+        y: scaledY,
+        line: { color: TIDE_LINE_COLOR, width: 2.5, shape: 'spline' },
+        name: 'Tide',
+        hoverinfo: 'skip',
+        showlegend: false
+      };
+    }
+
+    // Lets the toggle take effect immediately without requiring a full Update —
+    // tide data is tied to the buoy location + plotted window, not the current
+    // frame, so switching it on just needs one fetch (or the cache), not a re-fetch
+    // of wave/wind data.
+    async function onShowTideToggle() {
+      if (!timeSeriesData.length) return;
+      const checked = document.getElementById('showTide').checked;
+      const status = document.getElementById('statusMsg');
+
+      if (!checked) {
+        tideData = null;
+        resolvedTideStation = null;
+        renderTideStationMarker(null);
+        renderCurrentFrame();
+        return;
+      }
+
+      status.innerText = "Loading tide data...";
+      try {
+        await loadTideDataForCurrentWindow();
+        status.innerText = "Updated successfully.";
+      } catch (err) {
+        tideData = null;
+        resolvedTideStation = null;
+        renderTideStationMarker(null);
+        console.warn("Tide overlay unavailable:", err);
+        status.innerText = `Tide warning: ${err.message}`;
+      }
+      renderCurrentFrame();
     }
 
     /* =====================================================================
@@ -789,23 +1221,51 @@
       return Math.max(minYLimit, maxEnergy * 1.05);
     }
 
-    function updateSwellLegend(clusterCount) {
+    // clusters: the full swell cluster array (not just a count) so each legend
+    // entry can carry the same energy/period hover info as its polar-plot bubble.
+    // windGrade: { label, color } from getWindGradeInfo(), or null when there's
+    // no wind data for this frame.
+    function updateSwellLegend(clusters, effectiveWind, windGrade) {
       const legendContainer = document.getElementById('swellLegend');
-      if (clusterCount === 0) {
-        legendContainer.innerHTML = '<span style="font-size:11px;color:#888;">No prominent swells detected above threshold.</span>';
-        return;
-      }
-
       let html = '';
-      for (let i = 0; i < clusterCount; i++) {
-        const color = SWELL_RANK_COLORS[i % SWELL_RANK_COLORS.length];
+
+      // Good/Fair/Poor assessment, then Effective Wind (same color), then the
+      // swells — left-justified (see .legend-bar).
+      if (windGrade) {
         html += `
-          <div class="legend-item">
-            <span class="legend-color-box" style="background-color: ${color};"></span>
-            <span>Swell ${i + 1}</span>
+          <div class="legend-item legend-wind-grade">
+            <span style="color: ${windGrade.color};">${windGrade.label}</span>
           </div>
         `;
       }
+
+      if (effectiveWind !== null && effectiveWind !== undefined) {
+        html += `
+          <div class="legend-item legend-wind">
+            <span class="legend-color-box" style="background-color: ${(windGrade && windGrade.color) || WIND_GRADE_COLORS.fair};"></span>
+            <span>Effective Wind: ${effectiveWind.toFixed(1)} kts</span>
+          </div>
+        `;
+      }
+
+      if (clusters.length === 0) {
+        html += '<span style="font-size:11px;color:#888;">No prominent swells detected above threshold.</span>';
+      } else {
+        for (let i = 0; i < clusters.length; i++) {
+          const c = clusters[i];
+          const color = SWELL_RANK_COLORS[i % SWELL_RANK_COLORS.length];
+          // Same text as the matching polar-plot bubble's hovertext (see the
+          // Swell Markers trace below) so hovering either one tells you the same thing.
+          const hoverText = `Swell ${i + 1}: ${c.energy.toFixed(2)} m²/Hz @ ${c.period.toFixed(1)}s`;
+          html += `
+            <div class="legend-item" title="${hoverText}">
+              <span class="legend-color-box" style="background-color: ${color};"></span>
+              <span>Swell ${i + 1}</span>
+            </div>
+          `;
+        }
+      }
+
       legendContainer.innerHTML = html;
     }
 
@@ -820,14 +1280,52 @@
       const periods = frame.frequencies.map(f => 1 / f);
       const clusters = analyzeFrame(frame, settings.peakThreshold);
       const globalYMax = getGlobalYMax(settings.minYLimit);
-      const { periodLimit, surfEnergy, surfPeriod, critAngle } = settings;
+      const { periodLimit, surfEnergy, surfPeriod, critAngle, beachAngle, windGradeCutoffs } = settings;
 
-      updateSwellLegend(clusters.length);
+      // Beach Angle is the compass direction a surfer standing on the beach faces
+      // while looking out at the swell — i.e. the seaward/offshore direction. Since
+      // swell & wind "direction" values in this chart use the standard oceanographic
+      // "coming FROM" convention, that same bearing marks the ocean-facing half of the
+      // compass; the opposite half is the land/beach side. Coloring those two halves
+      // gives an at-a-glance onshore/offshore read: a wind arrow landing on the water
+      // half means the wind is coming from over the ocean (onshore); on the sand half
+      // means it's coming off the land (offshore). landFacingAngle doubles as the
+      // "dead offshore" reference bearing for the wind quality grading below.
+      const oceanFacingAngle = ((beachAngle % 360) + 360) % 360;
+      const landFacingAngle = (oceanFacingAngle + 180) % 360;
+
+      const effectiveWind = frame.wind ? calculateEffectiveWind(frame.wind) : null;
+      const windGradeInfo = frame.wind
+        ? getWindGradeInfo(effectiveWind, frame.wind.fromDir, landFacingAngle, windGradeCutoffs)
+        : null;
+      const windGradeColor = windGradeInfo ? windGradeInfo.color : null;
+
+      updateSwellLegend(clusters, effectiveWind, windGradeInfo);
 
       const circleAngles = Array.from({ length: 361 }, (_, i) => i);
       const circlePeriods = Array(361).fill(surfPeriod);
 
       const polarData = [
+        // 0a. Water half (ocean-facing side) background
+        {
+          type: 'barpolar',
+          r: [periodLimit],
+          theta: [oceanFacingAngle],
+          width: [180],
+          marker: { color: WATER_COLOR, line: { width: 0 } },
+          hoverinfo: 'skip',
+          showlegend: false
+        },
+        // 0b. Beach half (land-facing side) background
+        {
+          type: 'barpolar',
+          r: [periodLimit],
+          theta: [landFacingAngle],
+          width: [180],
+          marker: { color: SAND_COLOR, line: { width: 0 } },
+          hoverinfo: 'skip',
+          showlegend: false
+        },
         // 1. Swell Markers (Colored by Rank, text labels removed)
         {
           type: 'scatterpolar',
@@ -880,11 +1378,17 @@
       if (frame.wind) {
         const w = frame.wind;
         const arrowLength = w.speedKts;
-        const windColor = getWindColor(w.speedKts);
+        // windGradeColor was already computed above (shared with the legend swatch)
+        // from Effective Wind + this wind's direction relative to the beach.
+        const windColor = windGradeColor;
         const labelText = `${Math.round(w.speedKts)}g${Math.round(w.gustKts)}<br>kts`;
 
         const HEAD_LEN = 1.5;
-        const labelRadius = Math.max(arrowLength, HEAD_LEN) + 0.8;
+        // Keep the label inside the visible polar area even when wind speed (kts)
+        // exceeds the period-limit radial range — otherwise Plotly drops the
+        // text point entirely instead of clipping it.
+        const rawLabelRadius = Math.max(arrowLength, HEAD_LEN) + 0.8;
+        const labelRadius = Math.min(rawLabelRadius, periodLimit * 0.92);
 
         let dynamicPos = 'top center';
         const dir = w.fromDir % 360;
@@ -930,7 +1434,7 @@
           theta: [w.fromDir],
           text: [labelText],
           textposition: dynamicPos,
-          textfont: { color: windColor, size: 11, weight: 'bold' },
+          textfont: { color: WIND_LABEL_COLOR, size: 11, weight: 'bold' },
           name: 'Wind Label',
           hoverinfo: 'text'
         });
@@ -941,6 +1445,7 @@
           text: `Peak Swells & Wind (Polar) — <span style="font-size:11px;color:#555">${currentTimeStr}</span>`, 
           font: { size: 13 } 
         },
+        bargap: 0,
         polar: {
           angularaxis: {
             direction: "clockwise",
@@ -1040,8 +1545,25 @@
 
     function renderHeatmap({ globalYMax, periodLimit, surfPeriod, currentTimeStr }) {
       const yValues = timeSeriesData[0].frequencies.map(f => 1 / f);
-      const xValues = timeSeriesData.map((_, idx) => `Hr ${idx}`);
+      // Use the full, guaranteed-unique timestamp as the actual plotted x-position/key
+      // (timeSeriesData is already in strict chronological order). Two frames can share
+      // the same clock hour — NDBC stations often report more than once within an hour
+      // near the most recent end of the feed — and if the bare hour string were used as
+      // the x-value itself, Plotly's categorical axis would collapse those into a single
+      // column, silently dropping data and shifting everything after it (blank patches,
+      // wrong scale, and a misaligned current-frame marker). Keeping the real timestamp
+      // as the key and only swapping in the hour text for display avoids all of that.
+      const xValues = timeSeriesData.map(frame => frame.timestamp);
       const zValues = yValues.map((_, j) => timeSeriesData.map(frame => frame.energy[j]));
+
+      // Thin the displayed ticks (not the underlying columns — those stay one per
+      // frame) so labels don't get bunched together once there's more than a day
+      // of hourly data on screen. tickStep stays 1 (every hour labeled) for up to
+      // MAX_HEATMAP_TICKS columns, then grows just enough to keep the label count
+      // near that cap regardless of how many hours are plotted.
+      const tickStep = Math.max(1, Math.ceil(xValues.length / MAX_HEATMAP_TICKS));
+      const tickVals = xValues.filter((_, i) => i % tickStep === 0);
+      const tickText = tickVals.map(getETHourLabel);
 
       const heatmapData = [{
         z: zValues,
@@ -1053,16 +1575,31 @@
         zmax: globalYMax || DEFAULTS.minYLimit
       }];
 
+      if (document.getElementById('showTide').checked) {
+        const tideTrace = buildTideOverlayTrace(xValues, periodLimit);
+        if (tideTrace) heatmapData.push(tideTrace);
+      }
+
+      const tideTitleNote = (document.getElementById('showTide').checked && resolvedTideStation)
+        ? ` <span style="font-size:11px;color:${TIDE_LINE_COLOR}">| Tide: ${resolvedTideStation.name} (${resolvedTideStation.id})</span>`
+        : '';
+
       const heatmapLayout = {
-        title: { text: `Spectral Density Heatmap Over Time — <span style="font-size:11px;color:#555">Active Frame: ${currentTimeStr}</span>`, font: { size: 13 } },
-        xaxis: { title: 'Timeline Index' },
+        title: { text: `Spectral Density Heatmap Over Time — <span style="font-size:11px;color:#555">Active Frame: ${currentTimeStr}</span>${tideTitleNote}`, font: { size: 13 } },
+        xaxis: {
+          title: 'Hour (EDT/EST)',
+          type: 'category',
+          categoryorder: 'trace',
+          tickvals: tickVals,
+          ticktext: tickText
+        },
         yaxis: { title: 'Period (s)', range: [0, periodLimit] },
         margin: { t: 40, b: 40, l: 40, r: 20 },
         autosize: true,
         shapes: [
           {
             type: 'line', xref: 'x', yref: 'paper',
-            x0: `Hr ${currentFrameIdx}`, x1: `Hr ${currentFrameIdx}`, y0: 0, y1: 1,
+            x0: xValues[currentFrameIdx], x1: xValues[currentFrameIdx], y0: 0, y1: 1,
             line: { color: 'white', width: 3 }
           },
           {
