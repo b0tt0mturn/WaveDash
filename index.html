@@ -1,10 +1,42 @@
+<!--
+  Wave Dash
+  =========
+  Single-file surf-forecasting dashboard for NDBC wave buoys. Pulls live
+  spectral wave data (energy density vs. frequency), wind, and tide
+  predictions from NOAA (via a Cloudflare Worker CORS proxy) for a chosen
+  buoy/date range, then renders:
+    - a polar plot of ranked swells (period + direction) and the wind arrow,
+    - an energy-density-vs-period spectral plot for the current frame,
+    - a collapsible swell table (energy, height, period, face height),
+    - and an hours-long heatmap of the spectrum over time, with an optional
+      tide overlay.
+
+  Per-swell significant wave height is derived by band-integrating the
+  *measured* spectrum around each detected peak (Hs = 4*sqrt(m0)) — no
+  Pierson-Moskowitz/JONSWAP shape is assumed; see computeSwellBandM0().
+  Face height is an empirical beach-break estimate for a ~1:30 slope; see
+  estimateFaceHeightM().
+
+  Versioning: MAJOR.MINOR.PATCH (current version: see APP_VERSION below,
+  also shown next to the title). MAJOR = major/breaking changes, MINOR =
+  added functionality, PATCH = tweaks. Bumped only at explicit "ready to
+  push" points, not on every edit.
+
+  Changelog (brief — full history in claude/CHANGELOG.md, same project):
+    v1.0.0 (2026-09-18) — Baseline release: NDBC buoy/wind/tide data with
+      hourly playback; polar, spectral, and heatmap views; swell peak
+      detection & ranking; band-integrated per-swell height (ft) and
+      beach-break face height; collapsible swell table; popups showing
+      height alongside energy/period; minor cleanup (removed dead code,
+      de-duplicated swell color/hover-text helpers).
+-->
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Wave Dash</title>
-  
+
   <!-- Leaflet CSS & JS for Interactive Map -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -29,31 +61,38 @@
       overflow-y: auto;
       -webkit-overflow-scrolling: touch;
     }
-    body { 
-      font-family: Arial, sans-serif; 
-      margin: 0; 
-      padding: 10px; 
-      background: #f4f6f8; 
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 10px;
+      background: #f4f6f8;
       box-sizing: border-box;
     }
-    h2 { 
-      margin-top: 0; 
-      color: #1a252f; 
-      font-size: 1.3rem; 
+    h2 {
+      margin-top: 0;
+      color: #1a252f;
+      font-size: 1.3rem;
       text-align: center;
     }
-    
-    .grid-container { 
-      display: flex; 
-      flex-direction: column; 
-      gap: 15px; 
+    .version-badge {
+      font-size: 0.5em;
+      font-weight: normal;
+      color: #8a97a3;
+      vertical-align: middle;
+      margin-left: 6px;
+    }
+
+    .grid-container {
+      display: flex;
+      flex-direction: column;
+      gap: 15px;
       padding-bottom: 20px;
     }
-    .panel { 
-      background: white; 
-      padding: 12px; 
-      border-radius: 8px; 
-      box-shadow: 0 2px 5px rgba(0,0,0,0.1); 
+    .panel {
+      background: white;
+      padding: 12px;
+      border-radius: 8px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
     }
 
     .map-controls-row {
@@ -88,21 +127,21 @@
       grid-column: span 2;
     }
 
-    #map { 
-      height: 100%; 
+    #map {
+      height: 100%;
       min-height: 250px;
-      width: 100%; 
-      border-radius: 6px; 
+      width: 100%;
+      border-radius: 6px;
     }
 
-    .control-group { 
-      margin-bottom: 2px; 
+    .control-group {
+      margin-bottom: 2px;
     }
-    .control-group label { 
-      display: block; 
-      font-size: 10px; 
-      font-weight: bold; 
-      margin-bottom: 2px; 
+    .control-group label {
+      display: block;
+      font-size: 10px;
+      font-weight: bold;
+      margin-bottom: 2px;
       white-space: nowrap;
     }
     .control-group input, .control-group select {
@@ -118,40 +157,40 @@
       cursor: pointer;
     }
 
-    .btn { 
-      background: #007bff; 
-      color: white; 
-      border: none; 
-      padding: 8px 10px; 
-      border-radius: 4px; 
-      cursor: pointer; 
-      width: 100%; 
+    .btn {
+      background: #007bff;
+      color: white;
+      border: none;
+      padding: 8px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+      width: 100%;
       margin-top: 6px;
       font-weight: bold;
       font-size: 12px;
     }
     .btn:hover { background: #0056b3; }
     .status-msg { font-size: 10px; color: #6c757d; margin-top: 4px; font-style: italic; text-align: center; }
-    
-    .player-controls { 
-      display: flex; 
-      gap: 4px; 
-      align-items: center; 
-      justify-content: space-between; 
-      margin-bottom: 10px; 
+
+    .player-controls {
+      display: flex;
+      gap: 4px;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
     }
-    .player-btn { 
+    .player-btn {
       flex: 1;
-      padding: 8px 4px; 
-      font-weight: bold; 
+      padding: 8px 4px;
+      font-weight: bold;
       font-size: 12px;
-      cursor: pointer; 
-      background: #e9ecef; 
-      border: 1px solid #ced4da; 
-      border-radius: 4px; 
+      cursor: pointer;
+      background: #e9ecef;
+      border: 1px solid #ced4da;
+      border-radius: 4px;
     }
     .player-btn:hover { background: #dee2e6; }
-    
+
     .speed-select {
       padding: 7px 4px;
       border-radius: 4px;
@@ -233,10 +272,84 @@
       box-sizing: border-box;
     }
 
-    .plots-grid { 
-      display: flex; 
-      flex-direction: column; 
-      gap: 20px; 
+    /* Collapsible swell table, sitting between the polar/spectral plots and
+       the heatmap. Collapsed state is tracked in JS (swellTableOpen) and
+       re-applied after every re-render so it survives frame changes/playback
+       instead of resetting open on every tick. */
+    .swell-table-wrapper {
+      background: #f8f9fa;
+      border-radius: 6px;
+      border: 1px solid #e9ecef;
+      overflow: hidden;
+    }
+    .swell-table-toggle {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 10px;
+      background: #eef1f4;
+      border: none;
+      border-bottom: 1px solid #e9ecef;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: bold;
+      color: #333;
+      text-align: left;
+    }
+    .swell-table-toggle:hover { background: #e2e6ea; }
+    .swell-table-toggle .toggle-icon {
+      display: inline-block;
+      transition: transform 0.15s ease;
+    }
+    .swell-table-toggle.collapsed .toggle-icon {
+      transform: rotate(-90deg);
+    }
+    .swell-table-container {
+      overflow-x: auto;
+    }
+    .swell-table-container.collapsed {
+      display: none;
+    }
+    .swell-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    .swell-table th, .swell-table td {
+      padding: 6px 10px;
+      text-align: right;
+      white-space: nowrap;
+    }
+    .swell-table th:first-child, .swell-table td:first-child {
+      text-align: left;
+    }
+    .swell-table thead th {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      color: #6c757d;
+      border-bottom: 1px solid #dee2e6;
+    }
+    .swell-table tbody tr:not(:last-child) td {
+      border-bottom: 1px solid #eee;
+    }
+    .swell-rank-cell {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .swell-table-empty td {
+      padding: 10px;
+      font-size: 11px;
+      color: #888;
+      text-align: center;
+    }
+
+    .plots-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
     }
     .plot-box {
       height: 270px;
@@ -264,9 +377,9 @@
     @media (min-width: 768px) {
       body { padding: 15px; }
       h2 { font-size: 1.5rem; text-align: left; }
-      .plots-grid { 
-        display: grid; 
-        grid-template-columns: 1fr 1fr; 
+      .plots-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
       }
       .full-width { grid-column: span 2; }
       .plot-box { height: 320px; }
@@ -276,12 +389,12 @@
 </head>
 <body>
 
-  <h2>🌊 Wave Dash</h2>
+  <h2>🌊 Wave Dash <span id="appVersionLabel" class="version-badge"></span></h2>
 
   <div class="grid-container">
     <div class="panel">
       <div class="map-controls-row">
-        
+
         <div class="map-col">
           <label style="font-size: 12px; font-weight: bold; margin-bottom: 4px;">Select Wave / Wind Buoy:</label>
           <div id="map"></div>
@@ -289,7 +402,7 @@
 
         <div class="controls-col">
           <div class="params-grid">
-            
+
             <div class="control-group">
               <label>Wave Station ID:</label>
               <input type="text" id="stationId" value="41159">
@@ -304,7 +417,7 @@
               <label>End Date & Time (EST/EDT):</label>
               <input type="datetime-local" id="startDate">
             </div>
-            
+
             <div class="control-group">
               <label>Hours to Plot:</label>
               <input type="number" id="hoursToPlot" value="12" min="1" max="24">
@@ -367,7 +480,7 @@
         <button class="player-btn" id="playBtn" onclick="togglePlay()">▶ Play</button>
         <button class="player-btn" onclick="stepFrame(1)">Next ▶</button>
         <button class="player-btn" onclick="lastFrame()">Last ⏭</button>
-        
+
         <!-- Speed Dropdown -->
         <select id="speedSelect" class="speed-select" onchange="onSpeedChange()">
           <option value="2000">0.5x</option>
@@ -388,6 +501,32 @@
       <div class="plots-grid" style="margin-top: 15px;">
         <div id="polarPlot" class="plot-box"></div>
         <div id="spectralPlot" class="plot-box"></div>
+
+        <!-- Swell Table: energy/height/period/face-height per identified swell,
+             ranked by energy — collapsible, sits between the current-frame
+             plots above and the historical heatmap below. -->
+        <div class="full-width">
+          <div class="swell-table-wrapper">
+            <button type="button" class="swell-table-toggle" id="swellTableToggleBtn" onclick="toggleSwellTable()">
+              <span class="toggle-icon">▾</span> Swell Table
+            </button>
+            <div id="swellTableContainer" class="swell-table-container">
+              <table class="swell-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Energy (m²/Hz)</th>
+                    <th>Height (ft)</th>
+                    <th>Period (s)</th>
+                    <th>Face Height (ft)</th>
+                  </tr>
+                </thead>
+                <tbody id="swellTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
         <div class="tide-toggle-row full-width">
           <label><input type="checkbox" id="showTide" onchange="onShowTideToggle()"> Show Tide</label>
         </div>
@@ -400,6 +539,16 @@
     /* =====================================================================
        CONFIGURATION & CONSTANTS
        ===================================================================== */
+    // Versioning: MAJOR.MINOR.PATCH (e.g. v1.2.3)
+    //   MAJOR — major/breaking changes (redesigns, removed/reworked features)
+    //   MINOR — added functionality (new features)
+    //   PATCH — tweaks (fixes, small adjustments, cleanup)
+    // Bumped only at explicit "ready to push" points, not on every edit — see
+    // the CHANGELOG project doc for what's shipped under each version and
+    // what's still queued under Unreleased.
+    const APP_VERSION = "1.0.0";
+    document.getElementById('appVersionLabel').innerText = `v${APP_VERSION}`;
+
     const WORKER_URL = "https://noaa-wave-proxy.rwnster.workers.dev";
     const EARTH_RADIUS_MILES = 3958.8;
     const MILES_TO_METERS = 1609.34;
@@ -409,6 +558,7 @@
     const PEAK_DETECT_MIN_FREQ_HZ = 0.05;
     const PEAK_DETECT_MAX_FREQ_HZ = 0.20;
     const MPS_TO_KNOTS = 1.94384;
+    const M_TO_FT = 3.28084;
     // Heatmap x-axis: show at most this many tick labels. One hourly tick per
     // column reads fine for a day or less (<=24 columns, the common case); past
     // that, ticks are thinned to an even hour-step so labels stop bunching up
@@ -425,7 +575,7 @@
     const TIDE_QUERY_PADDING_MS = 24 * 60 * 60 * 1000;
     const TIDE_LINE_COLOR = 'rgb(91, 155, 213)'; // same ocean-blue hue as WATER_COLOR, full opacity for line visibility
 
-    const SWELL_RANK_COLORS = ['#e6194B', '#3cb44b', '#ffe119', '#4363d8']; 
+    const SWELL_RANK_COLORS = ['#e6194B', '#3cb44b', '#ffe119', '#4363d8'];
 
     const DEFAULTS = {
       periodLimit: 18,
@@ -506,6 +656,9 @@
     // stale popover can't linger across a frame change.
     let currentSwellDetails = [];
     let openSwellDetailIndex = null;
+    // Swell table open/closed state — persists across renderCurrentFrame() calls
+    // (frame changes, playback) instead of resetting to open every tick.
+    let swellTableOpen = true;
     let playInterval = null;
     let mapMarkersGroup = null;
     let tideMarkerGroup = null; // separate layer group so renderBuoysOnMap's clearLayers() never wipes the tide marker
@@ -593,12 +746,6 @@
       if (effectiveWind < clean) return { label: 'Good', color: WIND_GRADE_COLORS.clean };
       if (effectiveWind < fair) return { label: 'Fair', color: WIND_GRADE_COLORS.fair };
       return { label: 'Poor', color: WIND_GRADE_COLORS.poor };
-    }
-
-    // The single entry point for wind color alone (used by the wind stem/arrowhead,
-    // which don't need the label) — a thin wrapper over getWindGradeInfo.
-    function getWindGradeColor(effectiveWind, windFromDir, landFacingAngle, gradeCutoffs) {
-      return getWindGradeInfo(effectiveWind, windFromDir, landFacingAngle, gradeCutoffs).color;
     }
 
     /* =====================================================================
@@ -971,7 +1118,7 @@
         await updateDynamicBuoyDatabase(settings.stationId);
 
         status.innerText = "Fetching buoy and wind data...";
-        
+
         let windErrorMsg = null;
         const [spec, alpha1, alpha2] = await Promise.all([
           fetchNDBCFile(settings.stationId, 'data_spec'),
@@ -1228,25 +1375,146 @@
     /* =====================================================================
        SPECTRAL ANALYSIS & CHARTS
        ===================================================================== */
+    // Trapezoidal integral of energy density over frequency, between array
+    // indices i0 and i1 inclusive (i0 <= i1). Used both for the per-swell band
+    // integration below and for full-spectrum Hs if ever needed for debugging.
+    function trapzIntegral(freqsArr, energyArr, i0, i1) {
+      let total = 0;
+      for (let i = i0; i < i1; i++) {
+        total += 0.5 * (energyArr[i] + energyArr[i + 1]) * (freqsArr[i + 1] - freqsArr[i]);
+      }
+      return total;
+    }
+
+    // Significant wave height from the zeroth spectral moment (variance), the
+    // standard Hs = 4*sqrt(m0) relation — no PM/JONSWAP shape assumed, since
+    // m0 here comes directly from integrating the measured curve.
+    function hsFromM0(m0) {
+      return 4 * Math.sqrt(Math.max(m0, 0));
+    }
+
+    // First index whose frequency is >= target (clamped to the last index).
+    // Used to locate the outer band edges from PEAK_DETECT_MIN/MAX_FREQ_HZ
+    // without assuming a fixed bin layout — different NDBC buoys report
+    // different (non-uniform) frequency arrays.
+    function indexAtOrAfter(freqsArr, target) {
+      for (let i = 0; i < freqsArr.length; i++) {
+        if (freqsArr[i] >= target) return i;
+      }
+      return freqsArr.length - 1;
+    }
+
+    // Last index whose frequency is <= target (clamped to index 0).
+    function indexAtOrBefore(freqsArr, target) {
+      for (let i = freqsArr.length - 1; i >= 0; i--) {
+        if (freqsArr[i] <= target) return i;
+      }
+      return 0;
+    }
+
+    // Per-swell significant wave height via band integration of the *measured*
+    // spectrum — no Pierson-Moskowitz/JONSWAP shape assumed. Each selected
+    // peak's band runs from the trough (local energy minimum) shared with its
+    // neighboring peak to the trough shared with its other neighbor; the two
+    // outermost bands are capped at the existing swell detection window
+    // (PEAK_DETECT_MIN/MAX_FREQ_HZ) rather than running out to the edge of the
+    // full spectrum, so a swell's height reflects only the swell band it was
+    // detected in, not adjacent wind-sea/chop energy.
+    //
+    // Returns a Map from peak index -> band m0 (m^2), keyed the same way as
+    // selectedPeakIndices so callers can look up each selected peak's result.
+    function computeSwellBandM0(frame, selectedPeakIndices) {
+      const freqsArr = frame.frequencies;
+      const energyArr = frame.energy;
+      const loBound = indexAtOrAfter(freqsArr, PEAK_DETECT_MIN_FREQ_HZ);
+      const hiBound = indexAtOrBefore(freqsArr, PEAK_DETECT_MAX_FREQ_HZ);
+
+      const byFreq = [...selectedPeakIndices].sort((a, b) => freqsArr[a] - freqsArr[b]);
+      const bounds = [loBound];
+      for (let k = 0; k < byFreq.length - 1; k++) {
+        const a = byFreq[k], b = byFreq[k + 1];
+        let troughIdx = b;
+        let troughEnergy = energyArr[b];
+        for (let i = a + 1; i < b; i++) {
+          if (energyArr[i] < troughEnergy) {
+            troughEnergy = energyArr[i];
+            troughIdx = i;
+          }
+        }
+        bounds.push(troughIdx);
+      }
+      bounds.push(hiBound);
+
+      const m0ByIndex = new Map();
+      for (let k = 0; k < byFreq.length; k++) {
+        m0ByIndex.set(byFreq[k], trapzIntegral(freqsArr, energyArr, bounds[k], bounds[k + 1]));
+      }
+      return m0ByIndex;
+    }
+
+    // Beach-break wave face height estimate (empirical, ~1:30 beach slope):
+    // H_face ≈ 0.72 * H0^0.8 * T^0.4 — H0 and T must be in SI units (meters,
+    // seconds) for this fit; the result comes back in meters too, so it's
+    // converted to feet by the caller alongside everything else.
+    function estimateFaceHeightM(heightM, periodS) {
+      if (!isFinite(heightM) || heightM <= 0 || !isFinite(periodS) || periodS <= 0) return 0;
+      return 0.72 * Math.pow(heightM, 0.8) * Math.pow(periodS, 0.4);
+    }
+
     function analyzeFrame(frame, peakThreshold) {
       const freqs = frame.frequencies;
       const periods = freqs.map(f => 1 / f);
       const energyValues = frame.energy;
       const directionValues = frame.alpha1;
 
-      const clusters = [];
+      const peakIndices = [];
       for (let i = 1; i < freqs.length - 1; i++) {
         if (freqs[i] < PEAK_DETECT_MIN_FREQ_HZ || freqs[i] > PEAK_DETECT_MAX_FREQ_HZ) continue;
         const isLocalPeak = energyValues[i] >= energyValues[i - 1] && energyValues[i] >= energyValues[i + 1];
         if (isLocalPeak && energyValues[i] >= peakThreshold) {
-          clusters.push({
-            period: periods[i],
-            energy: energyValues[i],
-            direction: directionValues[i]
-          });
+          peakIndices.push(i);
         }
       }
-      return clusters.sort((a, b) => b.energy - a.energy).slice(0, MAX_SWELL_CLUSTERS);
+
+      // Rank by energy first (as before) — only the selected top peaks get a
+      // band computed for them, so a lower-energy peak that didn't make the
+      // cut doesn't split a neighboring swell's band in two.
+      const selected = peakIndices
+        .sort((a, b) => energyValues[b] - energyValues[a])
+        .slice(0, MAX_SWELL_CLUSTERS);
+
+      const bandM0ByIndex = computeSwellBandM0(frame, selected);
+
+      return selected.map(i => {
+        const m0 = bandM0ByIndex.get(i) || 0;
+        const heightM = hsFromM0(m0);
+        const heightFt = heightM * M_TO_FT;
+        const period = periods[i];
+        const faceFt = estimateFaceHeightM(heightM, period) * M_TO_FT;
+        return {
+          period,
+          energy: energyValues[i],
+          direction: directionValues[i],
+          heightM,
+          heightFt,
+          faceFt
+        };
+      });
+    }
+
+    // Rank color for a swell at legend/table/plot position i (0 = highest
+    // energy) — the one place SWELL_RANK_COLORS' wraparound indexing lives,
+    // rather than repeating `SWELL_RANK_COLORS[i % SWELL_RANK_COLORS.length]`
+    // at every call site that colors a swell by rank.
+    function swellRankColor(i) {
+      return SWELL_RANK_COLORS[i % SWELL_RANK_COLORS.length];
+    }
+
+    // Shared popup/hover text for a swell cluster — used by both the polar
+    // plot's hovertext and the legend's tap-to-show detail box, so the two
+    // can never drift out of sync with each other.
+    function formatSwellHoverText(c, i) {
+      return `Swell ${i + 1}: ${c.energy.toFixed(2)} m²/Hz @ ${c.period.toFixed(1)}s — ${c.heightFt.toFixed(1)} ft`;
     }
 
     function getGlobalYMax(minYLimit) {
@@ -1298,8 +1566,8 @@
       // thing. Every rebuild starts a fresh detail list and closes any open popover,
       // since it belonged to the previous frame's swells.
       currentSwellDetails = clusters.map((c, i) => ({
-        text: `Swell ${i + 1}: ${c.energy.toFixed(2)} m²/Hz @ ${c.period.toFixed(1)}s`,
-        color: SWELL_RANK_COLORS[i % SWELL_RANK_COLORS.length]
+        text: formatSwellHoverText(c, i),
+        color: swellRankColor(i)
       }));
       openSwellDetailIndex = null;
 
@@ -1355,6 +1623,54 @@
       box.style.borderLeftColor = detail.color;
     }
 
+    // Renders the collapsible swell table (energy / height / period / face
+    // height, ranked by energy — clusters already arrive in that order from
+    // analyzeFrame). The open/closed state persists across calls via the
+    // module-level swellTableOpen flag, applied at the end via
+    // applySwellTableOpenState() so playback/frame-stepping doesn't reset it.
+    function renderSwellTable(clusters) {
+      const tbody = document.getElementById('swellTableBody');
+      if (!tbody) return;
+
+      if (clusters.length === 0) {
+        tbody.innerHTML = `<tr class="swell-table-empty"><td colspan="5">No prominent swells detected above threshold.</td></tr>`;
+      } else {
+        tbody.innerHTML = clusters.map((c, i) => `
+          <tr>
+            <td>
+              <span class="swell-rank-cell">
+                <span class="legend-color-box" style="background-color: ${swellRankColor(i)};"></span>
+                ${i + 1}
+              </span>
+            </td>
+            <td>${c.energy.toFixed(2)}</td>
+            <td>${c.heightFt.toFixed(1)}</td>
+            <td>${c.period.toFixed(1)}</td>
+            <td>${c.faceFt.toFixed(1)}</td>
+          </tr>
+        `).join('');
+      }
+
+      applySwellTableOpenState();
+    }
+
+    // Applies swellTableOpen to the DOM — separated from the toggle handler so
+    // renderSwellTable() can re-apply it after rebuilding the table body
+    // (innerHTML replacement doesn't touch the container's own class, but this
+    // keeps both call sites — toggle and re-render — going through one path).
+    function applySwellTableOpenState() {
+      const container = document.getElementById('swellTableContainer');
+      const toggleBtn = document.getElementById('swellTableToggleBtn');
+      if (!container || !toggleBtn) return;
+      container.classList.toggle('collapsed', !swellTableOpen);
+      toggleBtn.classList.toggle('collapsed', !swellTableOpen);
+    }
+
+    function toggleSwellTable() {
+      swellTableOpen = !swellTableOpen;
+      applySwellTableOpenState();
+    }
+
     function renderCurrentFrame() {
       if (!timeSeriesData.length) return;
 
@@ -1387,6 +1703,7 @@
       const windGradeColor = windGradeInfo ? windGradeInfo.color : null;
 
       updateSwellLegend(clusters, effectiveWind, windGradeInfo);
+      renderSwellTable(clusters);
 
       const circleAngles = Array.from({ length: 361 }, (_, i) => i);
       const circlePeriods = Array(361).fill(surfPeriod);
@@ -1419,10 +1736,10 @@
           r: clusters.map(c => c.period),
           theta: clusters.map(c => c.direction),
           hoverinfo: 'text',
-          hovertext: clusters.map((c, i) => `Swell ${i + 1}: ${c.energy.toFixed(2)} m²/Hz @ ${c.period.toFixed(1)}s`),
+          hovertext: clusters.map((c, i) => formatSwellHoverText(c, i)),
           marker: {
             size: clusters.map(c => Math.max(c.energy * 25, 12)),
-            color: clusters.map((_, i) => SWELL_RANK_COLORS[i % SWELL_RANK_COLORS.length]),
+            color: clusters.map((_, i) => swellRankColor(i)),
             opacity: 0.85
           }
         },
@@ -1433,9 +1750,9 @@
           r: clusters.map(c => c.period),
           theta: clusters.map(c => c.direction),
           hoverinfo: 'none',
-          marker: { 
-            size: 5, 
-            color: clusters.map((_, i) => SWELL_RANK_COLORS[i % SWELL_RANK_COLORS.length]) 
+          marker: {
+            size: 5,
+            color: clusters.map((_, i) => swellRankColor(i))
           }
         },
         // 3. Critical Angle Line
@@ -1505,11 +1822,11 @@
           theta: [w.fromDir],
           name: 'Wind Arrowhead',
           hoverinfo: 'none',
-          marker: { 
-            size: 22, 
-            symbol: 'arrow', 
-            angle: (w.fromDir + 180) % 360, 
-            color: windColor 
+          marker: {
+            size: 22,
+            symbol: 'arrow',
+            angle: (w.fromDir + 180) % 360,
+            color: windColor
           }
         });
 
@@ -1527,9 +1844,9 @@
       }
 
       const polarLayout = {
-        title: { 
-          text: `Peak Swells & Wind (Polar) — <span style="font-size:11px;color:#555">${currentTimeStr}</span>`, 
-          font: { size: 13 } 
+        title: {
+          text: `Peak Swells & Wind (Polar) — <span style="font-size:11px;color:#555">${currentTimeStr}</span>`,
+          font: { size: 13 }
         },
         bargap: 0,
         polar: {
@@ -1575,7 +1892,7 @@
         y0: 0,
         y1: globalYMax,
         line: {
-          color: SWELL_RANK_COLORS[i % SWELL_RANK_COLORS.length],
+          color: swellRankColor(i),
           width: 2,
           dash: 'dash'
         }
@@ -1591,7 +1908,7 @@
         showarrow: false,
         yanchor: 'bottom',
         font: {
-          color: SWELL_RANK_COLORS[i % SWELL_RANK_COLORS.length],
+          color: swellRankColor(i),
           size: 12,
           weight: 'bold'
         }
