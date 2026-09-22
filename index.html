@@ -5,9 +5,12 @@
   spectral wave data (energy density vs. frequency), wind, and tide
   predictions from NOAA (via a Cloudflare Worker CORS proxy) for a chosen
   buoy/date range, then renders:
+    - a collapsible swell table (height, period, direction, face height,
+      energy — always 4 rows, padded with placeholders below the detected
+      count) with wind grade/Effective Wind/direction and overall
+      significant wave height in its own header bar,
     - a polar plot of ranked swells (period + direction) and the wind arrow,
     - an energy-density-vs-period spectral plot for the current frame,
-    - a collapsible swell table (energy, height, period, face height),
     - and an hours-long heatmap of the spectrum over time, with an optional
       tide overlay.
 
@@ -23,6 +26,19 @@
   push" points, not on every edit.
 
   Changelog (brief — full history in claude/CHANGELOG.md, same project):
+    v2.0.0 (2026-09-21) — Swell table reworked: reordered to Height/Period/
+      Direction/Face/Energy with a new Direction column; unit labels wrap
+      to a second line and columns are fixed-width so it never scrolls or
+      stretches; always renders all 4 rows (muted placeholders below the
+      detected count) so the plots below it don't jump between frames;
+      moved to sit above the polar/spectral plots; rank swatch is now a
+      colored bubble under the row number, matching the polar plot's
+      markers. Removed the standalone wind/swell legend bar — wind grade,
+      Effective Wind, wind direction (compass label), and overall
+      significant wave height (Hs, computed from the full spectrum) now
+      live in the swell table's own header bar instead. Heatmap Period
+      axis floored at 2s (was 0s) so the tide overlay line no longer
+      crosses blank space below the buoy's real data.
     v1.0.0 (2026-09-18) — Baseline release: NDBC buoy/wind/tide data with
       hourly playback; polar, spectral, and heatmap views; swell peak
       detection & ranking; band-integrated per-swell height (ft) and
@@ -204,78 +220,31 @@
     .slider-container { display: flex; flex-direction: column; gap: 5px; margin-top: 5px; }
     .slider-container input { width: 100%; }
 
-    .legend-bar {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      margin-top: 10px;
-      padding: 6px;
-      background: #f8f9fa;
-      border-radius: 6px;
-      border: 1px solid #e9ecef;
-    }
-    /* Wind (grade + Effective Wind) and swells are two separate rows so one
-       never wraps into the other on narrow/phone widths — each row wraps
-       within itself if it still doesn't fit. min-height keeps each row the
-       same height whether it holds a color-box item or just the plain-text
-       placeholder shown when there's no wind/swell data, so the legend's
-       total height — and everything below it — never jumps between frames. */
-    .legend-row {
-      display: flex;
-      flex-wrap: wrap;
-      justify-content: flex-start;
-      align-items: center;
-      gap: 8px 15px;
-      min-height: 16px;
-    }
-    .legend-item {
-      display: flex;
-      align-items: center;
-      gap: 5px;
-      font-size: 11px;
-      font-weight: bold;
-      color: #333;
-    }
-    /* Fixed width so the swell entries after it don't shift left/right as the
-       Effective Wind value's digit count changes from frame to frame. */
-    .legend-item.legend-wind {
-      width: 170px;
-      flex: 0 0 auto;
-    }
-    /* Good/Fair/Poor assessment, just before the Effective Wind entry. */
-    .legend-item.legend-wind-grade {
-      width: 40px;
-      flex: 0 0 auto;
-    }
-    .legend-color-box {
-      width: 12px;
-      height: 12px;
-      border-radius: 3px;
+    /* Rank bubble — a small circle under the row number in the swell table's
+       "#" column, colored to match that swell's marker on the polar plot
+       (see swellRankColor()). Round rather than the old square swatch so it
+       reads as the same "bubble" as the polar plot's scatter markers. */
+    .swell-rank-bubble {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
       display: inline-block;
     }
-    /* Swell items are tappable (see toggleSwellDetail) — title="" still gives
-       mouse users a native hover tooltip; the pointer cursor signals the tap
-       affordance for touch users, who have no hover state to rely on. */
-    .legend-item-tappable {
-      cursor: pointer;
-    }
-    .swell-detail-box {
-      font-size: 11px;
-      font-weight: normal;
-      color: #333;
-      background: #fff;
-      border-left: 3px solid #888;
-      border-radius: 3px;
-      padding: 4px 8px;
-      width: fit-content;
-      max-width: 100%;
-      box-sizing: border-box;
+    /* Empty rows (see renderSwellTable) pad the table out to a constant
+       MAX_SWELL_CLUSTERS rows regardless of how many swells were actually
+       detected this frame — an outline-only bubble (no fill) marks the slot
+       as unoccupied rather than implying a real, colored swell. */
+    .swell-rank-bubble-empty {
+      background: transparent;
+      border: 1px solid #ccc;
+      width: 7px;
+      height: 7px;
     }
 
-    /* Collapsible swell table, sitting between the polar/spectral plots and
-       the heatmap. Collapsed state is tracked in JS (swellTableOpen) and
-       re-applied after every re-render so it survives frame changes/playback
-       instead of resetting open on every tick. */
+    /* Collapsible swell table — now sits above the polar/spectral plots.
+       Collapsed state is tracked in JS (swellTableOpen) and re-applied after
+       every re-render so it survives frame changes/playback instead of
+       resetting open on every tick. */
     .swell-table-wrapper {
       background: #f8f9fa;
       border-radius: 6px;
@@ -302,6 +271,17 @@
       display: inline-block;
       transition: transform 0.15s ease;
     }
+    /* Wind grade (Good/Fair/Poor, colored per grade), Effective Wind + compass
+       direction, and significant wave height — left-justified right after
+       "Swell Table" in the same header bar (see updateSwellTableHeader()).
+       Normal weight and a muted color so it reads as secondary to the bold
+       "Swell Table" label; empty (and takes up no space) when there's no
+       wind/wave data for the current frame. */
+    .swell-table-wind-info {
+      font-weight: normal;
+      font-size: 11px;
+      color: #666;
+    }
     .swell-table-toggle.collapsed .toggle-icon {
       transform: rotate(-90deg);
     }
@@ -311,18 +291,28 @@
     .swell-table-container.collapsed {
       display: none;
     }
+    /* Fixed layout + explicit per-column widths (via <colgroup>) so the table
+       sits at one compact size and never stretches to fill a wide window —
+       it just leaves empty space in the panel instead. Column widths were
+       picked to add up to something that fits a phone screen without the
+       .swell-table-container's overflow-x ever having to kick in. */
     .swell-table {
-      width: 100%;
+      width: 312px;
+      table-layout: fixed;
       border-collapse: collapse;
       font-size: 12px;
     }
     .swell-table th, .swell-table td {
-      padding: 6px 10px;
+      box-sizing: border-box;
+      padding: 6px 6px;
       text-align: right;
       white-space: nowrap;
     }
+    /* The "#" column is centered — its cells hold a vertically-stacked
+       rank number + colored bubble (see .swell-rank-cell), not left-aligned
+       text like the header wrapping in the other columns. */
     .swell-table th:first-child, .swell-table td:first-child {
-      text-align: left;
+      text-align: center;
     }
     .swell-table thead th {
       font-size: 10px;
@@ -330,20 +320,39 @@
       letter-spacing: 0.03em;
       color: #6c757d;
       border-bottom: 1px solid #dee2e6;
+      /* Header text wraps (label on its own line, unit below via
+         .table-unit) instead of forcing the column wide enough for
+         "Energy (m²/Hz)" on one line — see .table-unit below. */
+      white-space: normal;
+      line-height: 1.25;
+      vertical-align: bottom;
+    }
+    .swell-table thead th .table-unit {
+      display: block;
+      text-transform: none;
+      font-weight: normal;
+      letter-spacing: 0;
+      color: #98a2ad;
+      font-size: 9px;
     }
     .swell-table tbody tr:not(:last-child) td {
       border-bottom: 1px solid #eee;
     }
+    /* Rank number over the colored bubble (see .swell-rank-bubble), centered
+       in the "#" column. */
     .swell-rank-cell {
       display: flex;
+      flex-direction: column;
       align-items: center;
-      gap: 6px;
-    }
-    .swell-table-empty td {
-      padding: 10px;
+      gap: 3px;
       font-size: 11px;
-      color: #888;
-      text-align: center;
+    }
+    /* Placeholder rows (see renderSwellTable) — the table always renders
+       MAX_SWELL_CLUSTERS rows so its height stays constant across frames
+       regardless of how many swells were actually detected; rows beyond the
+       real count are muted dashes rather than left blank or omitted. */
+    .swell-table-row-empty td {
+      color: #aaa;
     }
 
     .plots-grid {
@@ -495,30 +504,41 @@
         <input type="range" id="timeSlider" min="0" max="0" value="0" oninput="onSliderMove(this.value)">
       </div>
 
-      <!-- Swell Rank Legend Key -->
-      <div id="swellLegend" class="legend-bar"></div>
-
       <div class="plots-grid" style="margin-top: 15px;">
-        <div id="polarPlot" class="plot-box"></div>
-        <div id="spectralPlot" class="plot-box"></div>
-
-        <!-- Swell Table: energy/height/period/face-height per identified swell,
-             ranked by energy — collapsible, sits between the current-frame
-             plots above and the historical heatmap below. -->
+        <!-- Swell Table: height/period/direction/face-height/energy per identified
+             swell, ranked by energy — sits above the polar/spectral plots. Column
+             widths are fixed (see .swell-table) so it never stretches with the
+             window; unit labels wrap under each header (see .table-unit) instead
+             of widening the column. The standalone legend bar that used to sit
+             here (wind grade + Effective Wind, plus tappable swell badges) has
+             been removed — the wind grade/Effective Wind/direction and overall
+             significant wave height now live left-justified in this table's own
+             header bar (see #swellTableWindInfo / updateSwellTableHeader()), and
+             the swell badges are redundant with the table's own rows. -->
         <div class="full-width">
           <div class="swell-table-wrapper">
             <button type="button" class="swell-table-toggle" id="swellTableToggleBtn" onclick="toggleSwellTable()">
               <span class="toggle-icon">▾</span> Swell Table
+              <span id="swellTableWindInfo" class="swell-table-wind-info"></span>
             </button>
             <div id="swellTableContainer" class="swell-table-container">
               <table class="swell-table">
+                <colgroup>
+                  <col style="width:28px">
+                  <col style="width:56px">
+                  <col style="width:50px">
+                  <col style="width:58px">
+                  <col style="width:52px">
+                  <col style="width:68px">
+                </colgroup>
                 <thead>
                   <tr>
                     <th>#</th>
-                    <th>Energy (m²/Hz)</th>
-                    <th>Height (ft)</th>
-                    <th>Period (s)</th>
-                    <th>Face Height (ft)</th>
+                    <th>Height<span class="table-unit">(ft)</span></th>
+                    <th>Period<span class="table-unit">(s)</span></th>
+                    <th>Direction<span class="table-unit">(°)</span></th>
+                    <th>Face<span class="table-unit">(ft)</span></th>
+                    <th>Energy<span class="table-unit">(m²/Hz)</span></th>
                   </tr>
                 </thead>
                 <tbody id="swellTableBody"></tbody>
@@ -526,6 +546,9 @@
             </div>
           </div>
         </div>
+
+        <div id="polarPlot" class="plot-box"></div>
+        <div id="spectralPlot" class="plot-box"></div>
 
         <div class="tide-toggle-row full-width">
           <label><input type="checkbox" id="showTide" onchange="onShowTideToggle()"> Show Tide</label>
@@ -546,7 +569,7 @@
     // Bumped only at explicit "ready to push" points, not on every edit — see
     // the CHANGELOG project doc for what's shipped under each version and
     // what's still queued under Unreleased.
-    const APP_VERSION = "1.0.0";
+    const APP_VERSION = "2.0.0";
     document.getElementById('appVersionLabel').innerText = `v${APP_VERSION}`;
 
     const WORKER_URL = "https://noaa-wave-proxy.rwnster.workers.dev";
@@ -564,6 +587,13 @@
     // that, ticks are thinned to an even hour-step so labels stop bunching up
     // instead of growing denser with every extra hour plotted.
     const MAX_HEATMAP_TICKS = 24;
+    // Heatmap y-axis (Period) floor. The buoy's own frequency bins bottom out
+    // around a ~2s period, so the axis is floored there instead of at 0 — the
+    // heatmap's real data then fills the whole visible axis with no gap at the
+    // bottom for the tide overlay line to cross through. Shared with
+    // buildTideOverlayTrace() so the tide line is scaled against the same
+    // visible range as the heatmap itself.
+    const HEATMAP_MIN_PERIOD_S = 2;
 
     // NOAA CO-OPS API (tide predictions), routed through the same proxy worker
     // as the NDBC buoy requests above — see buildProxyUrl().
@@ -576,6 +606,11 @@
     const TIDE_LINE_COLOR = 'rgb(91, 155, 213)'; // same ocean-blue hue as WATER_COLOR, full opacity for line visibility
 
     const SWELL_RANK_COLORS = ['#e6194B', '#3cb44b', '#ffe119', '#4363d8'];
+
+    // 16-point compass rose, used to label a bearing (e.g. wind "from"
+    // direction) as N/NE/SSW/etc. instead of raw degrees — see degreesToCompass().
+    const COMPASS_16 = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE',
+                         'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
 
     const DEFAULTS = {
       periodLimit: 18,
@@ -650,12 +685,6 @@
     let windTimeSeriesMap = new Map();
     let currentFrameIdx = 0;
     let isPlaying = false;
-    // Swell legend tap-to-show detail (mobile has no hover, so the title-attribute
-    // tooltip alone doesn't reach phones — see toggleSwellDetail). Rebuilt by every
-    // updateSwellLegend() call; openSwellDetailIndex resets on each rebuild so a
-    // stale popover can't linger across a frame change.
-    let currentSwellDetails = [];
-    let openSwellDetailIndex = null;
     // Swell table open/closed state — persists across renderCurrentFrame() calls
     // (frame changes, playback) instead of resetting to open every tick.
     let swellTableOpen = true;
@@ -698,6 +727,13 @@
     function calculateEffectiveWind(wind) {
       if (!wind) return null;
       return wind.speedKts + (wind.gustKts - wind.speedKts) / 3;
+    }
+
+    // Compass-point label (N, NE, SSW, ...) for a bearing in degrees, rounded
+    // to the nearest of the 16 points in COMPASS_16.
+    function degreesToCompass(deg) {
+      const normalized = ((deg % 360) + 360) % 360;
+      return COMPASS_16[Math.round(normalized / 22.5) % 16];
     }
 
     // Smallest angle (0-180°) between two compass bearings.
@@ -1325,9 +1361,15 @@
       const minH = Math.min(...heights);
       const maxH = Math.max(...heights);
       const range = (maxH - minH) || 1; // guard a degenerate/flat window
-      const margin = periodLimit * 0.08; // inset from the very top/bottom axis edges
-      const usableRange = Math.max(periodLimit - margin * 2, 0);
-      const scaledY = heights.map(h => margin + ((h - minH) / range) * usableRange);
+      // Scaled against the heatmap's actual visible span (HEATMAP_MIN_PERIOD_S to
+      // periodLimit), not the full 0-to-periodLimit range — the axis itself is
+      // floored at HEATMAP_MIN_PERIOD_S (see renderHeatmap), so this keeps the
+      // tide line inset within the same plotted area instead of the portion
+      // below the floor that's no longer part of the visible axis.
+      const axisSpan = Math.max(periodLimit - HEATMAP_MIN_PERIOD_S, 0);
+      const margin = axisSpan * 0.08; // inset from the heatmap's own top/bottom axis edges
+      const usableRange = Math.max(axisSpan - margin * 2, 0);
+      const scaledY = heights.map(h => HEATMAP_MIN_PERIOD_S + margin + ((h - minH) / range) * usableRange);
 
       return {
         type: 'scatter',
@@ -1391,6 +1433,22 @@
     // m0 here comes directly from integrating the measured curve.
     function hsFromM0(m0) {
       return 4 * Math.sqrt(Math.max(m0, 0));
+    }
+
+    // Overall significant wave height (the same quantity NDBC reports as
+    // WVHT) for a frame, in feet — m0 integrated across the *entire* reported
+    // spectrum (all frequency bins), unlike the per-swell band heights in
+    // analyzeFrame() which are confined to the swell-detection window. NDBC's
+    // realtime2 spectral files (.data_spec) don't carry WVHT as its own
+    // field, so this is computed directly from the same energy/frequency
+    // arrays already fetched for the plots — no extra request needed. Same
+    // Hs = 4*sqrt(m0) relation the per-swell heights use (see hsFromM0 and
+    // the CHANGELOG note on validating that approach against NDBC's own
+    // reported WVHT), just integrated over the full spectrum instead of one
+    // swell's band.
+    function computeSignificantWaveHeightFt(frame) {
+      const m0 = trapzIntegral(frame.frequencies, frame.energy, 0, frame.frequencies.length - 1);
+      return hsFromM0(m0) * M_TO_FT;
     }
 
     // First index whose frequency is >= target (clamped to the last index).
@@ -1502,17 +1560,15 @@
       });
     }
 
-    // Rank color for a swell at legend/table/plot position i (0 = highest
-    // energy) — the one place SWELL_RANK_COLORS' wraparound indexing lives,
-    // rather than repeating `SWELL_RANK_COLORS[i % SWELL_RANK_COLORS.length]`
-    // at every call site that colors a swell by rank.
+    // Rank color for a swell at table/plot position i (0 = highest energy) —
+    // the one place SWELL_RANK_COLORS' wraparound indexing lives, rather than
+    // repeating `SWELL_RANK_COLORS[i % SWELL_RANK_COLORS.length]` at every
+    // call site that colors a swell by rank.
     function swellRankColor(i) {
       return SWELL_RANK_COLORS[i % SWELL_RANK_COLORS.length];
     }
 
-    // Shared popup/hover text for a swell cluster — used by both the polar
-    // plot's hovertext and the legend's tap-to-show detail box, so the two
-    // can never drift out of sync with each other.
+    // Hover text for a swell cluster's polar-plot bubble.
     function formatSwellHoverText(c, i) {
       return `Swell ${i + 1}: ${c.energy.toFixed(2)} m²/Hz @ ${c.period.toFixed(1)}s — ${c.heightFt.toFixed(1)} ft`;
     }
@@ -1526,130 +1582,86 @@
       return Math.max(minYLimit, maxEnergy * 1.05);
     }
 
-    // clusters: the full swell cluster array (not just a count) so each legend
-    // entry can carry the same energy/period hover info as its polar-plot bubble.
-    // windGrade: { label, color } from getWindGradeInfo(), or null when there's
-    // no wind data for this frame.
-    function updateSwellLegend(clusters, effectiveWind, windGrade) {
-      const legendContainer = document.getElementById('swellLegend');
+    // Wind grade (Good/Fair/Poor, colored) + Effective Wind + compass direction,
+    // plus the overall significant wave height, rendered into the swell table's
+    // own header bar (left-justified, right after "Swell Table" — see
+    // .swell-table-wind-info) instead of the standalone legend bar this used to
+    // be part of. Grade/wind/direction are grouped together with no dot between
+    // them (e.g. "Good 8.4 kts NE"), then a dot separates the wave height
+    // ("Good 8.4 kts NE · Hs 4.2 ft"); either group is skipped entirely when its
+    // data isn't available for the current frame, so the header just reads
+    // "Swell Table" with no trailing dash or placeholder.
+    function updateSwellTableHeader(effectiveWind, windGrade, windDirCompass, sigWaveHeightFt) {
+      const el = document.getElementById('swellTableWindInfo');
+      if (!el) return;
 
-      // Wind (Good/Fair/Poor assessment, then Effective Wind, same color) and
-      // swells are built as two separate rows (see .legend-row) so wind never
-      // wraps onto the same line as swells, or vice versa, on narrow screens.
-      // The wind row is ALWAYS rendered, even with no wind data, with a muted
-      // placeholder in its place (matching the swell row's own "none" message) —
-      // otherwise the legend loses a whole row of height when wind is missing,
-      // and everything below it (the plots) jumps up to fill the gap.
-      let windRow = '';
-      if (windGrade) {
-        windRow += `
-          <div class="legend-item legend-wind-grade">
-            <span style="color: ${windGrade.color};">${windGrade.label}</span>
-          </div>
-        `;
-      }
+      const windBits = [];
+      if (windGrade) windBits.push(`<span style="color: ${windGrade.color};">${windGrade.label}</span>`);
       if (effectiveWind !== null && effectiveWind !== undefined) {
-        windRow += `
-          <div class="legend-item legend-wind">
-            <span class="legend-color-box" style="background-color: ${(windGrade && windGrade.color) || WIND_GRADE_COLORS.fair};"></span>
-            <span>Effective Wind: ${effectiveWind.toFixed(1)} kts</span>
-          </div>
-        `;
-      }
-      if (!windRow) {
-        windRow = '<span style="font-size:11px;color:#888;">No wind data available.</span>';
+        windBits.push(`${effectiveWind.toFixed(1)} kts${windDirCompass ? ' ' + windDirCompass : ''}`);
       }
 
-      // Each swell's detail text is the same as its polar-plot bubble's hovertext
-      // (see the Swell Markers trace below), so hovering either one — or tapping
-      // the legend item on a touch device, via toggleSwellDetail() — says the same
-      // thing. Every rebuild starts a fresh detail list and closes any open popover,
-      // since it belonged to the previous frame's swells.
-      currentSwellDetails = clusters.map((c, i) => ({
-        text: formatSwellHoverText(c, i),
-        color: swellRankColor(i)
-      }));
-      openSwellDetailIndex = null;
-
-      let swellRow = '';
-      if (clusters.length === 0) {
-        swellRow += '<span style="font-size:11px;color:#888;">No prominent swells detected above threshold.</span>';
-      } else {
-        for (let i = 0; i < clusters.length; i++) {
-          const { text: hoverText, color } = currentSwellDetails[i];
-          // title="" keeps the native hover tooltip for mouse users; onclick covers
-          // touch devices, which have no hover state for title to key off of.
-          swellRow += `
-            <div class="legend-item legend-item-tappable" title="${hoverText}" onclick="toggleSwellDetail(${i})">
-              <span class="legend-color-box" style="background-color: ${color};"></span>
-              <span>Swell ${i + 1}</span>
-            </div>
-          `;
-        }
+      const parts = [];
+      if (windBits.length) parts.push(windBits.join(' '));
+      if (sigWaveHeightFt !== null && sigWaveHeightFt !== undefined && isFinite(sigWaveHeightFt)) {
+        parts.push(`Hs ${sigWaveHeightFt.toFixed(1)} ft`);
       }
 
-      // Both rows are always emitted (windRow always has content by this point,
-      // even if it's just the placeholder) so the legend's total height never
-      // changes based on what data happens to be present this frame.
-      let html = '';
-      html += `<div class="legend-row legend-row-wind">${windRow}</div>`;
-      html += `<div class="legend-row legend-row-swell">${swellRow}</div>`;
-      if (clusters.length > 0) {
-        html += `<div id="swellDetailBox" class="swell-detail-box" hidden></div>`;
-      }
-
-      legendContainer.innerHTML = html;
+      el.innerHTML = parts.join(' &middot; ');
     }
 
-    // Tap-to-show detail for a swell legend item (see updateSwellLegend). Tapping
-    // the same swell again closes it; tapping a different one switches to it.
-    function toggleSwellDetail(i) {
-      const box = document.getElementById('swellDetailBox');
-      if (!box) return;
-
-      if (openSwellDetailIndex === i) {
-        openSwellDetailIndex = null;
-        box.hidden = true;
-        box.innerText = '';
-        box.style.borderLeftColor = '';
-        return;
-      }
-
-      const detail = currentSwellDetails[i];
-      if (!detail) return;
-      openSwellDetailIndex = i;
-      box.hidden = false;
-      box.innerText = detail.text;
-      box.style.borderLeftColor = detail.color;
-    }
-
-    // Renders the collapsible swell table (energy / height / period / face
-    // height, ranked by energy — clusters already arrive in that order from
-    // analyzeFrame). The open/closed state persists across calls via the
-    // module-level swellTableOpen flag, applied at the end via
-    // applySwellTableOpenState() so playback/frame-stepping doesn't reset it.
+    // Renders the collapsible swell table (height / period / direction / face
+    // height / energy, ranked by energy — clusters already arrive in that
+    // order from analyzeFrame). Always renders exactly MAX_SWELL_CLUSTERS
+    // rows: frames with fewer detected swells get muted placeholder rows
+    // (dashes, hollow rank bubble) padding out the remainder, so the table's
+    // height — and the plots sitting below it — stay constant across frames
+    // instead of growing/shrinking with however many swells this frame had.
+    // The open/closed state persists across calls via the module-level
+    // swellTableOpen flag, applied at the end via applySwellTableOpenState()
+    // so playback/frame-stepping doesn't reset it.
     function renderSwellTable(clusters) {
       const tbody = document.getElementById('swellTableBody');
       if (!tbody) return;
 
-      if (clusters.length === 0) {
-        tbody.innerHTML = `<tr class="swell-table-empty"><td colspan="5">No prominent swells detected above threshold.</td></tr>`;
-      } else {
-        tbody.innerHTML = clusters.map((c, i) => `
-          <tr>
-            <td>
-              <span class="swell-rank-cell">
-                <span class="legend-color-box" style="background-color: ${swellRankColor(i)};"></span>
-                ${i + 1}
-              </span>
-            </td>
-            <td>${c.energy.toFixed(2)}</td>
-            <td>${c.heightFt.toFixed(1)}</td>
-            <td>${c.period.toFixed(1)}</td>
-            <td>${c.faceFt.toFixed(1)}</td>
-          </tr>
-        `).join('');
+      const rows = [];
+      for (let i = 0; i < MAX_SWELL_CLUSTERS; i++) {
+        const c = clusters[i];
+        if (c) {
+          rows.push(`
+            <tr>
+              <td>
+                <span class="swell-rank-cell">
+                  <span>${i + 1}</span>
+                  <span class="swell-rank-bubble" style="background-color: ${swellRankColor(i)};"></span>
+                </span>
+              </td>
+              <td>${c.heightFt.toFixed(1)}</td>
+              <td>${c.period.toFixed(1)}</td>
+              <td>${Math.round(((c.direction % 360) + 360) % 360)}°</td>
+              <td>${c.faceFt.toFixed(1)}</td>
+              <td>${c.energy.toFixed(2)}</td>
+            </tr>
+          `);
+        } else {
+          rows.push(`
+            <tr class="swell-table-row-empty">
+              <td>
+                <span class="swell-rank-cell">
+                  <span>${i + 1}</span>
+                  <span class="swell-rank-bubble swell-rank-bubble-empty"></span>
+                </span>
+              </td>
+              <td>—</td>
+              <td>—</td>
+              <td>—</td>
+              <td>—</td>
+              <td>—</td>
+            </tr>
+          `);
+        }
       }
+      tbody.innerHTML = rows.join('');
 
       applySwellTableOpenState();
     }
@@ -1701,8 +1713,10 @@
         ? getWindGradeInfo(effectiveWind, frame.wind.fromDir, landFacingAngle, windGradeCutoffs)
         : null;
       const windGradeColor = windGradeInfo ? windGradeInfo.color : null;
+      const windDirCompass = frame.wind ? degreesToCompass(frame.wind.fromDir) : null;
+      const sigWaveHeightFt = computeSignificantWaveHeightFt(frame);
 
-      updateSwellLegend(clusters, effectiveWind, windGradeInfo);
+      updateSwellTableHeader(effectiveWind, windGradeInfo, windDirCompass, sigWaveHeightFt);
       renderSwellTable(clusters);
 
       const circleAngles = Array.from({ length: 361 }, (_, i) => i);
@@ -1781,8 +1795,9 @@
       if (frame.wind) {
         const w = frame.wind;
         const arrowLength = w.speedKts;
-        // windGradeColor was already computed above (shared with the legend swatch)
-        // from Effective Wind + this wind's direction relative to the beach.
+        // windGradeColor was already computed above (shared with the swell table
+        // header's grade text) from Effective Wind + this wind's direction
+        // relative to the beach.
         const windColor = windGradeColor;
         const labelText = `${Math.round(w.speedKts)}g${Math.round(w.gustKts)}<br>kts`;
 
@@ -1996,7 +2011,7 @@
           tickvals: tickVals,
           ticktext: tickText
         },
-        yaxis: { title: 'Period (s)', range: [0, periodLimit] },
+        yaxis: { title: 'Period (s)', range: [HEATMAP_MIN_PERIOD_S, periodLimit] },
         margin: { t: 40, b: 40, l: 40, r: 20 },
         autosize: true,
         shapes: [
