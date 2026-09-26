@@ -1,157 +1,57 @@
-<!DOCTYPE html>
 <!--
-  ============================================================================
-  Wind Dash — v1.6.0
-  ============================================================================
-  A live NOAA NDBC wind buoy dashboard. Pick a station (by ID, or by clicking
-  the interactive map), fetch its recent wind/gust/direction readings, and
-  step or auto-play through hourly frames on an animated polar plot: a mean
-  wind arrow, a scatter of every raw gust reading (or, optionally, a split
-  wind|gust violin), foil/windsurf threshold
-  rings, and a wind summary card. An hourly table below the plot shows the
-  observed hours followed by a day of NWS forecast (wind, direction, temp).
+  Wave Dash
+  =========
+  Single-file surf-forecasting dashboard for NDBC wave buoys. Pulls live
+  spectral wave data (energy density vs. frequency), wind, and tide
+  predictions from NOAA (via a Cloudflare Worker CORS proxy) for a chosen
+  buoy/date range, then renders:
+    - a collapsible swell table (height, period, direction, face height,
+      energy — always 4 rows, padded with placeholders below the detected
+      count) with wind grade/Effective Wind/direction and overall
+      significant wave height in its own header bar,
+    - a polar plot of ranked swells (period + direction) and the wind arrow,
+    - an energy-density-vs-period spectral plot for the current frame,
+    - and an hours-long heatmap of the spectrum over time, with an optional
+      tide overlay.
 
-  Versioning: MAJOR.MINOR.PATCH (semver-style).
-    MAJOR — breaking/structural changes (e.g. a data-source or layout overhaul)
-    MINOR — new functionality, backward-compatible (e.g. a new plot or stat)
-    PATCH — fixes and small tweaks, no new functionality
-  Bump CONFIG.version (below) to match whenever you add a CHANGELOG entry —
-  that constant drives the "v#.#.#" tag shown next to the title.
+  Per-swell significant wave height is derived by band-integrating the
+  *measured* spectrum around each detected peak (Hs = 4*sqrt(m0)) — no
+  Pierson-Moskowitz/JONSWAP shape is assumed; see computeSwellBandM0().
+  Face height is an empirical beach-break estimate for a ~1:30 slope; see
+  estimateFaceHeightM().
 
-  CHANGELOG
-  ----------------------------------------------------------------------------
-  1.6.0  2026-09-26
-    - Optional split polar violin ("Violin plot" checkbox, off by default,
-      redraws instantly): one violin along the hour's mean direction, radius
-      = speed, angular half-width = kernel density of readings at that speed
-      (Gaussian KDE, Silverman bandwidth, floor 0.5 kt; each half spans its
-      own min..max). Wind speeds fill the counterclockwise half (blue), gusts
-      the clockwise half (red), on a shared width scale peaking at
-      CONFIG.violin.maxHalfWidthDeg (30). In violin mode the gust scatter and
-      wind range wedge are hidden; arrow, dots, labels and rings stay.
-    - Wind card title bar now shows "WIND 20g24": the hour's mean wind (blue)
-      and peak gust (red), whole knots, in larger type (title 13px, speeds
-      17px).
-    - Blue dot at the outer end of the mean-wind arrow (mean speed and
-      direction), same size as the red peak-gust dot, with hover text.
-    - Peak-gust label now sits a fixed 20 degrees counterclockwise of its dot
-      on the same ring (CONFIG.pointLabelAngleDeg) instead of pushed out
-      radially, so the period peak gust's label no longer falls off the plot.
-    - Fixed the wind range wedge through north: 355..15 degrees drew a
-      340-degree wedge the long way round; range ends are now measured from
-      the circular mean (dirRangeAroundMean).
-    - Default Windsurf Threshold 15 -> 13 kts.
-    - Hourly-plot forecast tag reads "NWS forecast for <station>".
+  Versioning: MAJOR.MINOR.PATCH (current version: see APP_VERSION below,
+  also shown next to the title). MAJOR = major/breaking changes, MINOR =
+  added functionality, PATCH = tweaks. Bumped only at explicit "ready to
+  push" points, not on every edit.
 
-  1.5.0  2026-09-20
-    - NWS forecast: the hourly table now continues 24 hours past the last
-      observed hour, using api.weather.gov (the same 2.5 km NDFD grid behind
-      the forecast.weather.gov graphical page) looked up at the selected
-      station's NDBC coordinates. Forecast columns sit behind a dashed "now"
-      divider, tinted and not clickable; the Mean/Peak Gust lines continue as
-      solid, lighter blue/red, with direction pointers and temperature
-      alongside. Fetched after the observations (it never blocks them), cached
-      per station, and left out if unavailable or if the window ends too long
-      ago to join up with it. CONFIG.forecastHours sets the length.
-    - Hourly table: new Day row of weekday names above the Hour row; small blue
-      whole-knot speed numbers under each Mean point; the active-hour highlight
-      is now one continuous box; the table auto-scrolls to keep the current
-      hour centered.
-    - Polar plot: removed the std-dev fan (the range wedge keeps the stronger
-      blue), the line legend, the Gust stats card, and Min/Max from the Wind
-      card. Peak-gust label sits further out (offset 0.12 -> 0.18) and is no
-      longer clipped at the outer ring (wider top/side margins).
-    - File is now saved as UTF-8 (it had been Windows-1252, which broke the
-      degree and plus-minus signs and lost the title emoji), and the player
-      control icons are inline SVG instead of lost font glyphs.
-
-  1.4.0  2026-09-20
-    - Hourly table: the Mean and Peak Gust number rows are replaced by one line
-      plot lined up with the hourly columns - Mean in the polar plot's blue,
-      Peak Gust in its red - with light gridlines, kt tick labels, and the same
-      blue box around the active hour. Clicking anywhere in the plot jumps to
-      that hour, like clicking a column.
-    - Hourly table: the wind barb row is gone (it was what set the column
-      width). It is now a small mouse-pointer arrow centered in each column and
-      rotated to the wind direction (pointing downwind, like the polar plot's
-      arrowhead); speed is not encoded since the plot above it already has it.
-      Columns can now be much narrower, so more hours fit on small screens.
-
-  1.3.1  2026-09-15
-    - Fixed Mean Wind (blue) label placement: the wind arrow's actual "tip" is
-      the arrowhead glyph at the plot's center (it points downwind), not the
-      stem's outer end — that outer end is the blunt tail. The label now sits
-      near the center, just past the arrowhead on the downwind side, instead
-      of out at the tail.
-
-  1.3.0  2026-09-15
-    - Wind Stats and Gust Stats cards moved off the plot's sidebar/footer and
-      pinned directly inside the polar plot frame instead — Wind in the NE
-      corner, Gust in the SE corner — so they stay visible in place instead of
-      reflowing below the plot as the window narrows. Cards shrunk to a
-      compact, semi-opaque overlay so the plot itself still dominates the
-      width. Moved the plot's radial-axis number labels from SE to S to stay
-      clear of the new Gust card.
-    - Mean Wind (blue) label now sits at a small fixed gap just past the wind
-      arrow's tip, instead of a gap that could grow large enough to reach
-      toward the Peak Gust (red) label when wind and gust direction were
-      close together.
-
-  1.2.1  2026-09-15
-    - Hourly table tightened for narrow screens: values dropped units
-      (no "kts"/"°F"/AM-PM), wind/gust rounded to the nearest whole knot,
-      and Hour is now bare 24-hour (e.g. "14", no minutes). Column padding
-      trimmed to fit more hours before the table needs to scroll.
-    - Wind barb ticks flipped to sweep toward the staff's outer tip
-      (feather/fletching style) instead of drooping back toward the
-      station, and scaled up (30px -> 38px) for legibility.
-    - Peak Gust (red) and Mean Wind (blue) polar-plot labels bumped ~50%
-      (10px -> 15px, 11px -> 17px).
-
-  1.2.0  2026-09-15
-    - New hourly table below the plot: one column per hourly frame, stacked
-      Hour / Wind (standard meteorological wind barb) / Mean / Peak Gust /
-      Air Temp, horizontally scrollable on narrow screens with a sticky
-      row-label column. The active (currently plotted) column is boxed in
-      blue; clicking any column jumps the plot to that hour, same as the
-      slider. Wind barbs are drawn to spec (not a font/icon set) — pennant
-      = 50kt, full barb = 10kt, half barb = 5kt, calm = open circle — per
-      the NWS convention (weather.gov/hfo/windbarbinfo).
-    - Added ATMP (air temperature) parsing from the NDBC feed, averaged
-      per hour in °F, to feed the new table's Temp row.
-
-  1.1.0  2026-09-15
-    - Foil Threshold and Windsurf Threshold now share one row.
-    - New "Max Axis (kts)" field next to Hours to Plot, letting the person
-      pin the polar plot's radial ceiling (i.e. zoom in/out) instead of
-      always autoscaling. Left blank, it shows "Auto (N)" as a live
-      placeholder and behaves exactly as before; a typed value overrides
-      the autoscale on every subsequent Update until the box is cleared
-      again.
-
-  1.0.1  2026-09-15
-    - Removed the 900px max-width cap on .grid-container so the page grows
-      edge-to-edge on wide windows, matching Wave Dash's (uncapped) behavior.
-      Purely a wide-desktop-window difference — both look identical on a
-      phone, which is the primary use case.
-
-  1.0.0  2026-09-14
-    - Replicated Wave Dash's map/control layout and interaction (radius
-      circle, popup station picker) onto the wind-only station map.
-    - Replicated Wave Dash's wind arrow (stem + arrowhead marker + dynamic
-      label placement) in place of the old compass-needle icon.
-    - Wind Stats: replaced the separate Std Dev row with a "mean ± std dev"
-      format, applied to both speed and direction.
-    - Gust Stats: dropped the std dev rows.
-    - Gust polar plot: replaced the range/±1s fan wedges with a raw scatter
-      of every gust reading in the hour.
-  ============================================================================
+  Changelog (brief — full history in claude/CHANGELOG.md, same project):
+    v2.0.0 (2026-09-21) — Swell table reworked: reordered to Height/Period/
+      Direction/Face/Energy with a new Direction column; unit labels wrap
+      to a second line and columns are fixed-width so it never scrolls or
+      stretches; always renders all 4 rows (muted placeholders below the
+      detected count) so the plots below it don't jump between frames;
+      moved to sit above the polar/spectral plots; rank swatch is now a
+      colored bubble under the row number, matching the polar plot's
+      markers. Removed the standalone wind/swell legend bar — wind grade,
+      Effective Wind, wind direction (compass label), and overall
+      significant wave height (Hs, computed from the full spectrum) now
+      live in the swell table's own header bar instead. Heatmap Period
+      axis floored at 2s (was 0s) so the tide overlay line no longer
+      crosses blank space below the buoy's real data.
+    v1.0.0 (2026-09-18) — Baseline release: NDBC buoy/wind/tide data with
+      hourly playback; polar, spectral, and heatmap views; swell peak
+      detection & ranking; band-integrated per-swell height (ft) and
+      beach-break face height; collapsible swell table; popups showing
+      height alongside energy/period; minor cleanup (removed dead code,
+      de-duplicated swell color/hover-text helpers).
 -->
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Wind Dash</title>
+  <title>Wave Dash</title>
 
   <!-- Leaflet CSS & JS for Interactive Map -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
@@ -163,7 +63,7 @@
     }
   </script>
 
-  <!-- Plotly.js -->
+  <!-- Plotly.js for Dynamic Vector Charts -->
   <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
   <script>
     if (typeof Plotly === 'undefined') {
@@ -190,12 +90,12 @@
       font-size: 1.3rem;
       text-align: center;
     }
-    .version-tag {
-      font-size: 0.55em;
+    .version-badge {
+      font-size: 0.5em;
       font-weight: normal;
-      color: #adb5bd;
+      color: #8a97a3;
       vertical-align: middle;
-      margin-left: 4px;
+      margin-left: 6px;
     }
 
     .grid-container {
@@ -218,6 +118,13 @@
       align-items: stretch;
     }
 
+    .map-col {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+
     .controls-col {
       flex: 1.2;
       display: flex;
@@ -236,11 +143,16 @@
       grid-column: span 2;
     }
 
+    #map {
+      height: 100%;
+      min-height: 250px;
+      width: 100%;
+      border-radius: 6px;
+    }
+
     .control-group {
       margin-bottom: 2px;
     }
-    .control-group.checkbox-row label { display: flex; align-items: center; gap: 5px; cursor: pointer; margin: 2px 0 0; }
-    .control-group.checkbox-row input { width: auto; margin: 0; padding: 0; }
     .control-group label {
       display: block;
       font-size: 10px;
@@ -248,13 +160,17 @@
       margin-bottom: 2px;
       white-space: nowrap;
     }
-    .control-group input {
+    .control-group input, .control-group select {
       width: 100%;
       padding: 4px 6px;
       box-sizing: border-box;
       border: 1px solid #ccc;
       border-radius: 4px;
       font-size: 11px;
+    }
+    .beach-angle-preset {
+      margin-top: 3px;
+      cursor: pointer;
     }
 
     .btn {
@@ -290,8 +206,6 @@
       border-radius: 4px;
     }
     .player-btn:hover { background: #dee2e6; }
-    /* Icons are inline SVG (not font glyphs), so they look the same everywhere. */
-    .player-btn .ico { width: 1em; height: 1em; fill: currentColor; vertical-align: -0.12em; }
 
     .speed-select {
       padding: 7px 4px;
@@ -306,192 +220,204 @@
     .slider-container { display: flex; flex-direction: column; gap: 5px; margin-top: 5px; }
     .slider-container input { width: 100%; }
 
-    .plot-and-stats {
-      margin-top: 10px;
+    /* Rank bubble — a small circle under the row number in the swell table's
+       "#" column, colored to match that swell's marker on the polar plot
+       (see swellRankColor()). Round rather than the old square swatch so it
+       reads as the same "bubble" as the polar plot's scatter markers. */
+    .swell-rank-bubble {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+    /* Empty rows (see renderSwellTable) pad the table out to a constant
+       MAX_SWELL_CLUSTERS rows regardless of how many swells were actually
+       detected this frame — an outline-only bubble (no fill) marks the slot
+       as unoccupied rather than implying a real, colored swell. */
+    .swell-rank-bubble-empty {
+      background: transparent;
+      border: 1px solid #ccc;
+      width: 7px;
+      height: 7px;
     }
 
-    /* Positioning context for the overlaid stats cards below — sized to match the
-       plot itself so the cards can be pinned to its corners. */
-    .plot-frame {
-      position: relative;
+    /* Collapsible swell table — now sits above the polar/spectral plots.
+       Collapsed state is tracked in JS (swellTableOpen) and re-applied after
+       every re-render so it survives frame changes/playback instead of
+       resetting open on every tick. */
+    .swell-table-wrapper {
+      background: #f8f9fa;
+      border-radius: 6px;
+      border: 1px solid #e9ecef;
+      overflow: hidden;
+    }
+    .swell-table-toggle {
       width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 10px;
+      background: #eef1f4;
+      border: none;
+      border-bottom: 1px solid #e9ecef;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: bold;
+      color: #333;
+      text-align: left;
     }
-
-    .plot-box {
-      height: 420px;
-      width: 100%;
+    .swell-table-toggle:hover { background: #e2e6ea; }
+    .swell-table-toggle .toggle-icon {
+      display: inline-block;
+      transition: transform 0.15s ease;
     }
-
-    /* Hourly table: horizontally scrolls on narrow screens (its natural home,
-       phones) instead of squeezing columns unreadably; on anything wide enough
-       it stretches to fill the plot/stats row above it via width:100%. */
-    .hourly-table-wrap {
-      margin-top: 14px;
-      padding-top: 10px;
-      border-top: 1px solid #e9ecef;
+    /* Wind grade (Good/Fair/Poor, colored per grade), Effective Wind + compass
+       direction, and significant wave height — left-justified right after
+       "Swell Table" in the same header bar (see updateSwellTableHeader()).
+       Normal weight and a muted color so it reads as secondary to the bold
+       "Swell Table" label; empty (and takes up no space) when there's no
+       wind/wave data for the current frame. */
+    .swell-table-wind-info {
+      font-weight: normal;
+      font-size: 11px;
+      color: #666;
+    }
+    .swell-table-toggle.collapsed .toggle-icon {
+      transform: rotate(-90deg);
+    }
+    .swell-table-container {
       overflow-x: auto;
     }
-    .hourly-table {
-      width: 100%;
+    .swell-table-container.collapsed {
+      display: none;
+    }
+    /* Fixed layout + explicit per-column widths (via <colgroup>) so the table
+       sits at one compact size and never stretches to fill a wide window —
+       it just leaves empty space in the panel instead. Column widths were
+       picked to add up to something that fits a phone screen without the
+       .swell-table-container's overflow-x ever having to kick in. */
+    .swell-table {
+      width: 312px;
+      table-layout: fixed;
       border-collapse: collapse;
-      table-layout: fixed;   /* equal-width hour columns, so the plot row can line up with them */
-      font-size: 10px;
+      font-size: 12px;
     }
-    .hourly-table td, .hourly-table th {
-      padding: 3px 2px;
-      text-align: center;
+    .swell-table th, .swell-table td {
+      box-sizing: border-box;
+      padding: 6px 6px;
+      text-align: right;
       white-space: nowrap;
-      cursor: pointer;
     }
-    .hourly-table tr.hb-hour-row td {
+    /* The "#" column is centered — its cells hold a vertically-stacked
+       rank number + colored bubble (see .swell-rank-cell), not left-aligned
+       text like the header wrapping in the other columns. */
+    .swell-table th:first-child, .swell-table td:first-child {
+      text-align: center;
+    }
+    .swell-table thead th {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      color: #6c757d;
+      border-bottom: 1px solid #dee2e6;
+      /* Header text wraps (label on its own line, unit below via
+         .table-unit) instead of forcing the column wide enough for
+         "Energy (m²/Hz)" on one line — see .table-unit below. */
+      white-space: normal;
+      line-height: 1.25;
+      vertical-align: bottom;
+    }
+    .swell-table thead th .table-unit {
+      display: block;
+      text-transform: none;
+      font-weight: normal;
+      letter-spacing: 0;
+      color: #98a2ad;
+      font-size: 9px;
+    }
+    .swell-table tbody tr:not(:last-child) td {
+      border-bottom: 1px solid #eee;
+    }
+    /* Rank number over the colored bubble (see .swell-rank-bubble), centered
+       in the "#" column. */
+    .swell-rank-cell {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 3px;
+      font-size: 11px;
+    }
+    /* Placeholder rows (see renderSwellTable) — the table always renders
+       MAX_SWELL_CLUSTERS rows so its height stays constant across frames
+       regardless of how many swells were actually detected; rows beyond the
+       real count are muted dashes rather than left blank or omitted. */
+    .swell-table-row-empty td {
+      color: #aaa;
+    }
+
+    .plots-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+    .plot-box {
+      height: 270px;
+      width: 100%;
+    }
+    .tide-toggle-row {
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+      font-size: 12px;
       font-weight: bold;
       color: #333;
     }
-    .hb-row-label {
-      position: sticky;
-      left: 0;
-      background: #fff;
-      text-align: left;
-      font-weight: bold;
-      color: #6c757d;
-      cursor: default;
-      z-index: 1;
-    }
-    /* Active hour: ONE box drawn over the whole table (positioned in JS from the active
-       column's real geometry - see positionHourlyActiveBox), rather than a border traced
-       cell by cell, so its outline is continuous across every row. It sits below the
-       sticky label column (z-index 1) so it slides under it when scrolled away. */
-    .hourly-table-inner { position: relative; }
-    .hb-active-box {
-      position: absolute;
-      display: none;
-      box-sizing: border-box;
-      border: 2px solid #007bff;
-      border-radius: 3px;
-      background: rgba(0, 123, 255, 0.10);
-      pointer-events: none;
-      z-index: 0;
-    }
-
-    /* Wind-direction pointer row and the Mean/Gust line-plot row. The plot is one
-       cell spanning every hour column, so it lines up with them exactly. */
-    /* width:100% + max-width lets the arrow shrink with a squeezed column instead of overflowing it */
-    .hb-pointer { display: block; margin: 0 auto; width: 100%; max-width: 22px; height: auto; }
-    .hourly-table td.hb-plot-cell { padding: 0; }
-    .hb-plot-box { position: relative; }
-    .hb-plot-box svg { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: block; }
-    .hb-plot-tick {
-      position: absolute; left: 2px;
-      font-size: 8px; line-height: 1; color: #9aa5b1;
-      transform: translateY(-100%);
-      text-shadow: 0 0 2px #fff, 0 0 2px #fff;
-      pointer-events: none;
-    }
-    .hb-plot-label { line-height: 1.5; }
-
-    /* NWS forecast columns: same rows as the observed hours, but tinted, grayed and not
-       clickable (there is no polar frame behind them), with a dashed divider at "now". */
-    .hourly-table td.hb-fcst,
-    .hourly-table tr.hb-hour-row td.hb-fcst { background: #f4f6f8; color: #6c757d; cursor: default; }
-    .hourly-table td.hb-fcst-start { border-left: 1px dashed #adb5bd; }
-    /* Weekday header row: labels sit at the left of their day's span (and stick there while
-       scrolling); a hairline marks where each new day starts, lining up with the plot's midnight lines. */
-    .hourly-table tr.hb-day-row td { text-align: left; cursor: default; padding: 1px 2px; font-size: 9px; font-weight: bold; color: #6c757d; }
-    .hourly-table td.hb-day-start { border-left: 1px solid #ced4da; }
-    .hb-day-label { position: sticky; display: inline-block; }
-    .hb-plot-tag {
-      position: absolute; top: 0;
-      font-size: 8px; line-height: 10px; color: #6c757d;
-      white-space: nowrap; pointer-events: none;
-    }
-    .hb-plot-tag { top: auto; bottom: 0; font-style: italic; }   /* under the 0 line, clear of the weekday labels up top */
-    .hb-plot-val {
-      position: absolute;
-      transform: translate(-50%, 4px);
-      font-size: 8px; line-height: 1; font-weight: bold;
-      text-shadow: 0 0 2px #fff, 0 0 2px #fff;
-      pointer-events: none;
-    }
-
-    .stats-card {
-      background: rgba(255, 255, 255, 0.9);
-      border: 1px solid #e9ecef;
-      border-radius: 6px;
-      padding: 4px 7px;
-      line-height: 1.3;
-    }
-
-    .stats-card h4 {
-      margin: 0 0 2px 0;
-      font-size: 9px;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-
-    .stats-card.wind h4 { color: #007bff; border-bottom: 1px solid #007bff; padding-bottom: 1px; font-size: 13px; }
-    /* "20g24" after the Wind title: mean in blue, peak gust in red (colors set from CONFIG
-       in updateStatsPanel). text-transform off so the "g" stays lowercase. */
-    .wind-title-speeds { text-transform: none; letter-spacing: 0; margin-left: 4px; font-size: 17px; }
-    .wind-title-speeds .wt-g { color: #6c757d; }
-
-    .stat-row {
+    .tide-toggle-row label {
       display: flex;
-      justify-content: space-between;
-      gap: 8px;
-      font-size: 10px;
-      white-space: nowrap;
+      align-items: center;
+      gap: 5px;
+      cursor: pointer;
     }
-
-    .stat-label { color: #6c757d; font-weight: bold; }
-
-    /* Pinned into the plot's own corners (see .plot-frame) instead of sitting beside
-       or below it — small, semi-opaque, and out of the polar circle's way, so the
-       plot keeps the full width and the cards never reflow on a narrow window. */
-    .stats-overlay {
-      position: absolute;
-      z-index: 3;
-      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
-    }
-    .stats-overlay-ne { top: 4px; right: 4px; }
-
-    .map-col {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      min-width: 0;
-    }
-
-    #map {
-      height: 100%;
-      min-height: 250px;
-      width: 100%;
-      border-radius: 6px;
+    .tide-toggle-row input[type="checkbox"] {
+      width: auto;
+      cursor: pointer;
     }
 
     @media (min-width: 768px) {
       body { padding: 15px; }
-      h2 { font-size: 1.5rem; }
+      h2 { font-size: 1.5rem; text-align: left; }
+      .plots-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+      }
+      .full-width { grid-column: span 2; }
+      .plot-box { height: 320px; }
       .slider-container { flex-direction: row; align-items: center; }
     }
   </style>
 </head>
 <body>
 
-  <h2>💨 Wind Dash <span id="versionTag" class="version-tag"></span></h2>
+  <h2>🌊 Wave Dash <span id="appVersionLabel" class="version-badge"></span></h2>
 
   <div class="grid-container">
     <div class="panel">
       <div class="map-controls-row">
 
         <div class="map-col">
-          <label style="font-size: 12px; font-weight: bold; margin-bottom: 4px;">Select Wind Buoy:</label>
+          <label style="font-size: 12px; font-weight: bold; margin-bottom: 4px;">Select Wave / Wind Buoy:</label>
           <div id="map"></div>
         </div>
 
         <div class="controls-col">
           <div class="params-grid">
 
-            <div class="control-group span-full">
+            <div class="control-group">
+              <label>Wave Station ID:</label>
+              <input type="text" id="stationId" value="41159">
+            </div>
+
+            <div class="control-group">
               <label>Wind Station ID:</label>
               <input type="text" id="windStationId" value="CLKN7">
             </div>
@@ -503,26 +429,48 @@
 
             <div class="control-group">
               <label>Hours to Plot:</label>
-              <input type="number" id="hoursToPlot" value="12" min="1" max="120" step="1">
+              <input type="number" id="hoursToPlot" value="12" min="1" max="24">
             </div>
 
             <div class="control-group">
-              <label>Max Axis (kts):</label>
-              <input type="number" id="axisMaxKt" min="1" step="1" placeholder="Auto">
+              <label>Period Limit (s):</label>
+              <input type="number" id="periodLimit" value="18" min="5" max="30">
             </div>
 
             <div class="control-group">
-              <label>Foil Threshold (kts):</label>
-              <input type="number" id="foilKt" value="10" min="0" max="100" step="1">
+              <label>Axis Limit (m²/Hz):</label>
+              <input type="number" step="0.1" id="minYLimit" value="2.0" min="0.1">
             </div>
 
             <div class="control-group">
-              <label>Windsurf Threshold (kts):</label>
-              <input type="number" id="windsurfKt" value="13" min="0" max="100" step="1">
+              <label>Worthy Energy:</label>
+              <input type="number" step="0.1" id="surfEnergy" value="1.0">
             </div>
 
-            <div class="control-group span-full checkbox-row">
-              <label><input type="checkbox" id="violinToggle"> Violin plot (wind | gust distribution)</label>
+            <div class="control-group">
+              <label>Worthy Period (s):</label>
+              <input type="number" id="surfPeriod" value="9">
+            </div>
+
+            <div class="control-group">
+              <label>Angle of Interest (°):</label>
+              <input type="number" id="critAngle" value="120">
+            </div>
+
+            <div class="control-group">
+              <label>Swell Thresh (m²/Hz):</label>
+              <input type="number" step="0.05" id="peakThreshold" value="0.1">
+            </div>
+
+            <div class="control-group">
+              <label>Beach Angle (°):</label>
+              <input type="number" id="beachAngle" value="120" min="0" max="360">
+              <select id="beachAnglePreset" class="beach-angle-preset" onchange="applyBeachAnglePreset(this.value)">
+                <option value="" selected>Presets…</option>
+                <option value="120">120° LH</option>
+                <option value="205">205° PP</option>
+                <option value="240">240° GM</option>
+              </select>
             </div>
 
           </div>
@@ -536,12 +484,13 @@
 
     <div class="panel">
       <div class="player-controls">
-        <button class="player-btn" onclick="firstFrame()"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="2" height="10"/><path d="M14 3v10L5.5 8z"/></svg> First</button>
-        <button class="player-btn" onclick="stepFrame(-1)"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M12 3v10L4 8z"/></svg> Rev</button>
-        <button class="player-btn" id="playBtn" onclick="togglePlay()"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 3v10l9-5z"/></svg> Play</button>
-        <button class="player-btn" onclick="stepFrame(1)">Next <svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 3v10l8-5z"/></svg></button>
-        <button class="player-btn" onclick="lastFrame()">Last <svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 3v10l8.5-5z"/><rect x="12" y="3" width="2" height="10"/></svg></button>
+        <button class="player-btn" onclick="firstFrame()">⏮ First</button>
+        <button class="player-btn" onclick="stepFrame(-1)">◀ Rev</button>
+        <button class="player-btn" id="playBtn" onclick="togglePlay()">▶ Play</button>
+        <button class="player-btn" onclick="stepFrame(1)">Next ▶</button>
+        <button class="player-btn" onclick="lastFrame()">Last ⏭</button>
 
+        <!-- Speed Dropdown -->
         <select id="speedSelect" class="speed-select" onchange="onSpeedChange()">
           <option value="2000">0.5x</option>
           <option value="1000" selected>1x</option>
@@ -551,1374 +500,1637 @@
       </div>
 
       <div class="slider-container">
-        <span id="timestampDisplay" style="font-weight: bold; text-align: center; min-width: 180px;">Loading...</span>
+        <span id="timestampDisplay" style="font-weight: bold; text-align: center;">Loading...</span>
         <input type="range" id="timeSlider" min="0" max="0" value="0" oninput="onSliderMove(this.value)">
       </div>
 
-      <div class="plot-and-stats">
-        <!-- Stats cards are overlaid in the plot's own corners (NE=wind, SE=gust) rather
-             than laid out beside/below it, so they stay put — and stay visible — no
-             matter how narrow the window gets, and the polar plot keeps the full width. -->
-        <div class="plot-frame">
-          <div id="plotCombined" class="plot-box"></div>
-
-          <div class="stats-card wind stats-overlay stats-overlay-ne">
-            <h4>Wind <span class="wind-title-speeds"><span id="wTitleMean" class="wt-mean"></span><span id="wTitleG" class="wt-g"></span><span id="wTitleGust" class="wt-gust"></span></span></h4>
-            <div class="stat-row"><span class="stat-label">Mean:</span><span id="wMean">-</span></div>
-            <div class="stat-row"><span class="stat-label">Dir:</span><span id="wDir">-</span></div>
+      <div class="plots-grid" style="margin-top: 15px;">
+        <!-- Swell Table: height/period/direction/face-height/energy per identified
+             swell, ranked by energy — sits above the polar/spectral plots. Column
+             widths are fixed (see .swell-table) so it never stretches with the
+             window; unit labels wrap under each header (see .table-unit) instead
+             of widening the column. The standalone legend bar that used to sit
+             here (wind grade + Effective Wind, plus tappable swell badges) has
+             been removed — the wind grade/Effective Wind/direction and overall
+             significant wave height now live left-justified in this table's own
+             header bar (see #swellTableWindInfo / updateSwellTableHeader()), and
+             the swell badges are redundant with the table's own rows. -->
+        <div class="full-width">
+          <div class="swell-table-wrapper">
+            <button type="button" class="swell-table-toggle" id="swellTableToggleBtn" onclick="toggleSwellTable()">
+              <span class="toggle-icon">▾</span> Swell Table
+              <span id="swellTableWindInfo" class="swell-table-wind-info"></span>
+            </button>
+            <div id="swellTableContainer" class="swell-table-container">
+              <table class="swell-table">
+                <colgroup>
+                  <col style="width:28px">
+                  <col style="width:56px">
+                  <col style="width:50px">
+                  <col style="width:58px">
+                  <col style="width:52px">
+                  <col style="width:68px">
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Height<span class="table-unit">(ft)</span></th>
+                    <th>Period<span class="table-unit">(s)</span></th>
+                    <th>Direction<span class="table-unit">(°)</span></th>
+                    <th>Face<span class="table-unit">(ft)</span></th>
+                    <th>Energy<span class="table-unit">(m²/Hz)</span></th>
+                  </tr>
+                </thead>
+                <tbody id="swellTableBody"></tbody>
+              </table>
+            </div>
           </div>
         </div>
-      </div>
 
-      <div class="hourly-table-wrap" id="hourlyWrap">
-        <div class="hourly-table-inner">
-          <table class="hourly-table" id="hourlyTable"></table>
-          <div class="hb-active-box" id="hourlyActiveBox"></div>
+        <div id="polarPlot" class="plot-box"></div>
+        <div id="spectralPlot" class="plot-box"></div>
+
+        <div class="tide-toggle-row full-width">
+          <label><input type="checkbox" id="showTide" onchange="onShowTideToggle()"> Show Tide</label>
         </div>
+        <div id="heatmapPlot" class="plot-box full-width"></div>
       </div>
-
     </div>
   </div>
 
   <script>
-    /* =========================================================================
-       CONFIG
-       Static values that never change at runtime.
-    ========================================================================= */
-    const CONFIG = {
-      // Bump alongside a new CHANGELOG entry in the header comment (semver: MAJOR.MINOR.PATCH).
-      version: '1.6.0',
-      workerUrl: 'https://noaa-wave-proxy.rwnster.workers.dev',
-      defaultPlaybackMs: 1000,
-      mpsToKnots: 1.94384,
-      kmhToKnots: 0.539957,     // NWS gridpoint wind layers are in km/h
-      nwsApiBase: 'https://api.weather.gov',   // supports CORS, so it is called directly (no worker proxy)
-      forecastHours: 24,        // forecast columns appended after the last observed hour
-      forecastMaxAgeMs: 10 * 60 * 1000,        // reuse a fetched forecast this long before refetching
-      minGustAxis: 15,          // floor for the radial gust axis so calm periods don't look zoomed-in
-      axisPaddingFactor: 1.15,  // headroom above the observed max gust when sizing the radial axis
-      mapCenter: [34.622, -76.525],
-      mapZoom: 7,
-      stationTableUrl: 'https://www.ndbc.noaa.gov/data/stations/station_table.txt',
-      nearbyRadiusMiles: 100,
-      milesToMeters: 1609.34,
-      plotly: { displayModeBar: false, scrollZoom: false, responsive: true },
-      hourlyTable: {
-        labelColPx: 34,   // sticky row-label column
-        minColPx: 20,     // narrowest an hour column may get before the table scrolls sideways
-        plotHeightPx: 96  // height of the Mean/Gust line-plot row
-      },
-      colors: {
-        gustScatter: 'rgba(220, 53, 69, 0.55)',
-        gustPeak: '#dc3545',
-        windRange: { fill: 'rgba(0, 123, 255, 0.35)', line: 'rgba(0, 123, 255, 0.8)' },
-        windStem: '#007bff',
-        violinWind: { fill: 'rgba(0, 123, 255, 0.35)', line: 'rgba(0, 123, 255, 0.9)' },
-        violinGust: { fill: 'rgba(220, 53, 69, 0.30)', line: 'rgba(220, 53, 69, 0.9)' },
-        gustPeakForecast: '#ed9aa2',   // lighter shade of gustPeak, for the forecast half of the table plot
-        windStemForecast: '#80bdff',   // lighter shade of windStem, likewise
-        thresholdFoil: '#28a745',
-        thresholdWindsurf: '#1b5e20'
-      },
-      radialGridlines: 4,        // max number of concentric gridlines on the radial axis
-      violin: {
-        maxHalfWidthDeg: 30, // widest either half of the split violin gets (at its density peak), in degrees
-        minBandwidthKt: 0.5, // floor on the KDE bandwidth, so near-constant hours don't collapse to a spike
-        steps: 40            // radial samples along each half's outline
-      },
-      pointLabelAngleDeg: 20,       // point labels sit this many degrees counterclockwise of their marker, on the same ring
-      arrowHeadLenFactor: 0.08   // stem gap left for the arrowhead marker, as a fraction of the radial axis — also
-                                 // doubles as the Mean Wind label's radius, so the label sits just past that glyph
+    /* =====================================================================
+       CONFIGURATION & CONSTANTS
+       ===================================================================== */
+    // Versioning: MAJOR.MINOR.PATCH (e.g. v1.2.3)
+    //   MAJOR — major/breaking changes (redesigns, removed/reworked features)
+    //   MINOR — added functionality (new features)
+    //   PATCH — tweaks (fixes, small adjustments, cleanup)
+    // Bumped only at explicit "ready to push" points, not on every edit — see
+    // the CHANGELOG project doc for what's shipped under each version and
+    // what's still queued under Unreleased.
+    const APP_VERSION = "2.0.0";
+    document.getElementById('appVersionLabel').innerText = `v${APP_VERSION}`;
+
+    const WORKER_URL = "https://noaa-wave-proxy.rwnster.workers.dev";
+    const EARTH_RADIUS_MILES = 3958.8;
+    const MILES_TO_METERS = 1609.34;
+    const NEARBY_BUOY_RADIUS_MILES = 200;
+    const PLAYBACK_INTERVAL_MS = 1000;
+    const MAX_SWELL_CLUSTERS = 4;
+    const PEAK_DETECT_MIN_FREQ_HZ = 0.05;
+    const PEAK_DETECT_MAX_FREQ_HZ = 0.20;
+    const MPS_TO_KNOTS = 1.94384;
+    const M_TO_FT = 3.28084;
+    // Heatmap x-axis: show at most this many tick labels. One hourly tick per
+    // column reads fine for a day or less (<=24 columns, the common case); past
+    // that, ticks are thinned to an even hour-step so labels stop bunching up
+    // instead of growing denser with every extra hour plotted.
+    const MAX_HEATMAP_TICKS = 24;
+    // Heatmap y-axis (Period) floor. The buoy's own frequency bins bottom out
+    // around a ~2s period, so the axis is floored there instead of at 0 — the
+    // heatmap's real data then fills the whole visible axis with no gap at the
+    // bottom for the tide overlay line to cross through. Shared with
+    // buildTideOverlayTrace() so the tide line is scaled against the same
+    // visible range as the heatmap itself.
+    const HEATMAP_MIN_PERIOD_S = 2;
+
+    // NOAA CO-OPS API (tide predictions), routed through the same proxy worker
+    // as the NDBC buoy requests above — see buildProxyUrl().
+    const TIDE_STATIONS_URL = "https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations.json?type=tidepredictions";
+    const TIDE_PREDICTIONS_URL = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter";
+    // Padding added on each side of the plotted window when requesting hi/lo
+    // predictions, so there's always a bracketing tide event to interpolate from
+    // at both edges of the chart (a semidiurnal cycle is ~12.4h, so 24h is safe).
+    const TIDE_QUERY_PADDING_MS = 24 * 60 * 60 * 1000;
+    const TIDE_LINE_COLOR = 'rgb(91, 155, 213)'; // same ocean-blue hue as WATER_COLOR, full opacity for line visibility
+
+    const SWELL_RANK_COLORS = ['#e6194B', '#3cb44b', '#ffe119', '#4363d8'];
+
+    // 16-point compass rose, used to label a bearing (e.g. wind "from"
+    // direction) as N/NE/SSW/etc. instead of raw degrees — see degreesToCompass().
+    const COMPASS_16 = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE',
+                         'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+
+    const DEFAULTS = {
+      periodLimit: 18,
+      minYLimit: 2.0,
+      surfEnergy: 1.0,
+      surfPeriod: 9,
+      beachAngle: 135
     };
 
-    /* =========================================================================
+    // Wind quality cutoffs (Effective Wind, kts): below "Clean" reads green,
+    // between "Clean" and "Poor" reads orange (fair), at/above "Poor" reads red.
+    // Onshore is flat regardless of exact angle; the offshore side is linearly
+    // interpolated through the 45°-offshore anchor down to dead offshore. See
+    // getWindQualityCutoffs() for how these three anchors are blended.
+    //
+    // Not user-editable in the UI by design — these are tuned in code as
+    // experience/feedback comes in, rather than exposed as controls.
+    const WIND_GRADE_CUTOFFS = {
+      onshoreClean: 4,
+      onshoreFair: 7,
+      off45Clean: 8,
+      off45Fair: 16,
+      deadOffClean: 12,
+      deadOffFair: 20
+    };
+
+    // Status colors (validated via the dataviz skill's palette checker) —
+    // reserved for this good/fair/poor read and never reused as a categorical
+    // series color. "fair" is a darker burnt-amber (not the more typical bright
+    // caution-orange) specifically so the wind arrow reads clearly against the
+    // WATER_COLOR/SAND_COLOR polar backgrounds — validated at 4.95:1 contrast
+    // vs the water half and 5.43:1 vs the sand half (both clear the 3:1 floor;
+    // the original bright orange was 1.11:1 / 1.22:1), while still passing CVD
+    // separation and the normal-vision floor against clean/poor.
+    const WIND_GRADE_COLORS = {
+      clean: '#0ca30c', // good
+      fair: '#7a4008',  // caution
+      poor: '#d03b3b'   // critical
+    };
+
+    // Wind speed label on the polar plot: fixed black regardless of grade color,
+    // so it reads clearly against both the water and sand backgrounds.
+    const WIND_LABEL_COLOR = '#000000';
+
+    // Validated with the dataviz skill's palette checker (CVD delta-E 18.6, normal-vision
+    // delta-E 22.7 — well clear of the safe floors) so the two halves stay distinguishable
+    // for colorblind viewers, not just by eye.
+    const WATER_COLOR = 'rgba(91, 155, 213, 0.5)';   // ocean blue
+    const SAND_COLOR = 'rgba(217, 165, 102, 0.55)';  // beach tan
+
+    const afmhotYellowCap = [
+      [0.0, '#000000'],
+      [0.2, '#660000'],
+      [0.5, '#CC3300'],
+      [0.8, '#FF6600'],
+      [1.0, '#FFFF80']
+    ];
+
+    const plotlyConfig = {
+      displayModeBar: false,
+      scrollZoom: false,
+      responsive: true
+    };
+
+    const SURF_GUIDE_LINE_STYLE = { color: 'green', width: 2, dash: 'solid' };
+    const CRIT_ANGLE_LINE_STYLE = { color: 'green', width: 2.5, dash: 'solid' };
+
+    /* =====================================================================
        STATE
-       The single source of truth for what's currently loaded / displayed.
-    ========================================================================= */
-    const state = {
-      frames: [],        // one entry per hourly bucket, oldest first
-      frameIdx: 0,
-      isPlaying: false,
-      playTimer: null,
-      maxGustAxis: CONFIG.minGustAxis, // radial axis ceiling, derived from the loaded period
-      stationTable: null,  // all NDBC stations with coordinates, fetched once and cached
-      autoEndDate: true,   // true until the person edits the End Date & Time field by hand
-      frameStationId: '',  // station the current frames were loaded for (upper-case)
-      forecastData: null,  // NWS forecast for that station, as hour-keyed Maps (see fetchNwsForecast)
-      forecastGridUrls: {},// station id -> NWS gridpoint URL, so /points is only looked up once per station
-      forecastRequestId: 0 // bumped per load, so a slow, superseded forecast fetch can be ignored
-    };
+       ===================================================================== */
+    let timeSeriesData = [];
+    let windTimeSeriesMap = new Map();
+    let currentFrameIdx = 0;
+    let isPlaying = false;
+    // Swell table open/closed state — persists across renderCurrentFrame() calls
+    // (frame changes, playback) instead of resetting to open every tick.
+    let swellTableOpen = true;
+    let playInterval = null;
+    let mapMarkersGroup = null;
+    let tideMarkerGroup = null; // separate layer group so renderBuoysOnMap's clearLayers() never wipes the tide marker
 
-    let map; // Leaflet map instance, created in initMap()
-    let mapMarkersGroup = null; // layer group holding the active + nearby station markers
+    // Tide overlay state (heatmap only). currentBuoyLocation is set whenever the
+    // wave buoy resolves (see updateDynamicBuoyDatabase) so the Show Tide toggle
+    // can look up the nearest tide station even if flipped after the fact, without
+    // needing a fresh Update click. tideStationListCache/nearestTideStationCache
+    // avoid re-fetching NOAA's full (multi-thousand-station) list on every use.
+    let currentBuoyLocation = null;
+    let tideStationListCache = null;
+    const nearestTideStationCache = new Map();
+    let tideData = null; // [{ utcMs, height }, ...] sorted ascending, or null if unavailable
+    let resolvedTideStation = null; // { id, name, lat, lon, distanceMiles } for the station tideData came from, or null
 
-    /* =========================================================================
-       DOM REFERENCES
-       Cached once; values are re-read live where needed (e.g. inputs).
-    ========================================================================= */
-    const dom = {
-      windStationId: document.getElementById('windStationId'),
-      startDate: document.getElementById('startDate'),
-      hoursToPlot: document.getElementById('hoursToPlot'),
-      axisMaxKt: document.getElementById('axisMaxKt'),
-      foilKt: document.getElementById('foilKt'),
-      windsurfKt: document.getElementById('windsurfKt'),
-      violinToggle: document.getElementById('violinToggle'),
-      statusMsg: document.getElementById('statusMsg'),
-      timeSlider: document.getElementById('timeSlider'),
-      timestampDisplay: document.getElementById('timestampDisplay'),
-      playBtn: document.getElementById('playBtn'),
-      speedSelect: document.getElementById('speedSelect'),
-      plotEl: document.getElementById('plotCombined'),
-      hourlyTable: document.getElementById('hourlyTable'),
-      hourlyWrap: document.getElementById('hourlyWrap'),
-      hourlyActiveBox: document.getElementById('hourlyActiveBox'),
-      stat: {
-        wMean: document.getElementById('wMean'),
-        wDir: document.getElementById('wDir'),
-        wTitleMean: document.getElementById('wTitleMean'),
-        wTitleG: document.getElementById('wTitleG'),
-        wTitleGust: document.getElementById('wTitleGust')
+    const fallbackBuoyDatabase = [
+      { id: "41159", name: "41159 - Onslow Bay Outer, NC", lat: 34.211, lon: -76.944 },
+      { id: "CLKN7", name: "CLKN7 - Cape Lookout, NC", lat: 34.622, lon: -76.525 },
+      { id: "41013", name: "41013 - Frying Pan Shoals, NC", lat: 33.436, lon: -77.743 },
+      { id: "41036", name: "41036 - Onslow Bay Inner, NC", lat: 34.207, lon: -76.949 },
+      { id: "41002", name: "41002 - South Hatteras, NC", lat: 31.759, lon: -74.936 },
+      { id: "41004", name: "41004 - Edisto, SC", lat: 32.502, lon: -79.099 },
+      { id: "41008", name: "41008 - Grays Reef, GA", lat: 31.400, lon: -80.866 },
+      { id: "41009", name: "41009 - Canaveral 20 NM East, FL", lat: 28.526, lon: -80.188 },
+      { id: "41010", name: "41010 - Canaveral 120 NM East, FL", lat: 28.878, lon: -78.485 },
+      { id: "44014", name: "44014 - Virginia Beach, VA", lat: 36.611, lon: -74.836 },
+      { id: "44025", name: "44025 - Long Island, NY", lat: 40.251, lon: -73.164 }
+    ];
+
+    /* =====================================================================
+       WIND METRICS
+       ===================================================================== */
+    // Effective Wind = Mean Wind + (Gust - Mean Wind) / 3
+    // The sustained/mean wind speed, nudged up by a third of the gust's excess
+    // over the mean — so gustier conditions read as a higher effective wind
+    // even when the mean speed alone is the same.
+    function calculateEffectiveWind(wind) {
+      if (!wind) return null;
+      return wind.speedKts + (wind.gustKts - wind.speedKts) / 3;
+    }
+
+    // Compass-point label (N, NE, SSW, ...) for a bearing in degrees, rounded
+    // to the nearest of the 16 points in COMPASS_16.
+    function degreesToCompass(deg) {
+      const normalized = ((deg % 360) + 360) % 360;
+      return COMPASS_16[Math.round(normalized / 22.5) % 16];
+    }
+
+    // Smallest angle (0-180°) between two compass bearings.
+    function angularDistance(a, b) {
+      const diff = Math.abs(a - b) % 360;
+      return diff > 180 ? 360 - diff : diff;
+    }
+
+    // 0° = dead offshore (wind blows straight out to sea, along the beach's
+    // seaward bearing). 180° = dead onshore (wind blows straight in at the beach).
+    // landFacingAngle is the bearing wind comes FROM when it's dead offshore —
+    // i.e. Beach Angle + 180° (see the water/sand background comment above).
+    function getOffshoreAngle(windFromDir, landFacingAngle) {
+      return angularDistance(windFromDir, landFacingAngle);
+    }
+
+    // Blends the three configured anchor points (onshore / 45°-offshore / dead
+    // offshore) into a Clean/Poor cutoff pair for the wind's actual angle.
+    // Onshore is flat (any onshore angle uses the same cutoffs); the offshore
+    // side linearly interpolates in two segments through the 45° anchor.
+    function getWindQualityCutoffs(offAngle, g) {
+      if (offAngle >= 90) {
+        return { clean: g.onshoreClean, fair: g.onshoreFair };
       }
-    };
-
-    /* =========================================================================
-       SETTINGS / TIME HELPERS
-    ========================================================================= */
-    function getUserSettings() {
-      // Blank/invalid Max Axis means "auto" — null tells fetchAndProcessData() to
-      // fall back to the data-driven autoscale instead of a fixed radial ceiling.
-      const axisMaxRaw = parseFloat(dom.axisMaxKt.value);
-      const axisMaxKt = dom.axisMaxKt.value.trim() !== '' && !isNaN(axisMaxRaw) && axisMaxRaw > 0
-        ? axisMaxRaw
-        : null;
-
+      if (offAngle <= 45) {
+        const t = offAngle / 45; // 0 at dead offshore -> 1 at 45° offshore
+        return {
+          clean: g.deadOffClean + (g.off45Clean - g.deadOffClean) * t,
+          fair: g.deadOffFair + (g.off45Fair - g.deadOffFair) * t
+        };
+      }
+      const t = (offAngle - 45) / 45; // 0 at 45° offshore -> 1 at onshore boundary
       return {
-        windStationId: dom.windStationId.value.trim(),
-        hoursToPlot: parseFloat(dom.hoursToPlot.value) || 12,
-        startDate: dom.startDate.value,
-        axisMaxKt,
-        foilKt: parseFloat(dom.foilKt.value) || 0,
-        windsurfKt: parseFloat(dom.windsurfKt.value) || 0,
-        violin: dom.violinToggle.checked
+        clean: g.off45Clean + (g.onshoreClean - g.off45Clean) * t,
+        fair: g.off45Fair + (g.onshoreFair - g.off45Fair) * t
+      };
+    }
+
+    // Shared grading logic: Effective Wind graded against the direction-dependent
+    // Clean/Poor cutoffs, returned as a { label, color } pair. "clean"/"poor" are
+    // the internal cutoff names (see WIND_GRADE_CUTOFFS); the user-facing labels
+    // are Good/Fair/Poor.
+    function getWindGradeInfo(effectiveWind, windFromDir, landFacingAngle, gradeCutoffs) {
+      const offAngle = getOffshoreAngle(windFromDir, landFacingAngle);
+      const { clean, fair } = getWindQualityCutoffs(offAngle, gradeCutoffs);
+      if (effectiveWind < clean) return { label: 'Good', color: WIND_GRADE_COLORS.clean };
+      if (effectiveWind < fair) return { label: 'Fair', color: WIND_GRADE_COLORS.fair };
+      return { label: 'Poor', color: WIND_GRADE_COLORS.poor };
+    }
+
+    /* =====================================================================
+       CONTROL PANEL HELPERS
+       ===================================================================== */
+    // Plain `|| DEFAULTS.x` (still used above for a few legacy fields) silently
+    // discards a user-entered 0, which is a valid value for several of these
+    // fields (e.g. a due-north Beach Angle) — so this checks for NaN explicitly.
+    function parseNumOrDefault(elementId, defaultValue) {
+      const v = parseFloat(document.getElementById(elementId).value);
+      return Number.isNaN(v) ? defaultValue : v;
+    }
+
+    function getUserSettings() {
+      return {
+        stationId: document.getElementById('stationId').value.trim(),
+        windStationId: document.getElementById('windStationId').value.trim(),
+        hoursToPlot: parseInt(document.getElementById('hoursToPlot').value),
+        startDate: document.getElementById('startDate').value,
+        periodLimit: parseFloat(document.getElementById('periodLimit').value) || DEFAULTS.periodLimit,
+        minYLimit: parseFloat(document.getElementById('minYLimit').value) || DEFAULTS.minYLimit,
+        surfEnergy: parseFloat(document.getElementById('surfEnergy').value) || DEFAULTS.surfEnergy,
+        surfPeriod: parseFloat(document.getElementById('surfPeriod').value) || DEFAULTS.surfPeriod,
+        critAngle: parseFloat(document.getElementById('critAngle').value),
+        peakThreshold: parseFloat(document.getElementById('peakThreshold').value),
+        beachAngle: parseNumOrDefault('beachAngle', DEFAULTS.beachAngle),
+        // Not read from the UI — see the WIND_GRADE_CUTOFFS constant.
+        windGradeCutoffs: WIND_GRADE_CUTOFFS
       };
     }
 
     function buildProxyUrl(targetUrl) {
-      return `${CONFIG.workerUrl}?url=${encodeURIComponent(targetUrl)}`;
+      return `${WORKER_URL}?url=${encodeURIComponent(targetUrl)}`;
     }
 
+    // The preset dropdown is just a shortcut into the Beach Angle number field —
+    // the number field stays the single source of truth, so free-text entry still
+    // works exactly as before. Picking a preset fills it in and, if data is already
+    // loaded, re-renders immediately (no need to re-fetch — Beach Angle only affects
+    // the polar plot's background coloring). The select resets to its placeholder
+    // right after so it never looks "stuck" on a preset once the number is hand-edited.
+    function applyBeachAnglePreset(value) {
+      if (!value) return;
+      document.getElementById('beachAngle').value = value;
+      document.getElementById('beachAnglePreset').value = '';
+      if (timeSeriesData.length) {
+        renderCurrentFrame();
+      }
+    }
+
+    /* =====================================================================
+       DATE / TIME HELPERS
+       ===================================================================== */
     function getETDateParts(dateObj, options) {
       const formatter = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', ...options });
       const parts = {};
-      formatter.formatToParts(dateObj).forEach(p => { if (p.type !== 'literal') parts[p.type] = p.value; });
+      formatter.formatToParts(dateObj).forEach(p => {
+        if (p.type !== 'literal') parts[p.type] = p.value;
+      });
       return parts;
     }
 
-    function formatToET(dateObj, { roundToHour = true } = {}) {
+    function formatToET(dateObj) {
       const p = getETDateParts(dateObj, {
         year: 'numeric', month: '2-digit', day: '2-digit',
         hour: '2-digit', minute: '2-digit', hour12: false, timeZoneName: 'short'
       });
-      const minute = roundToHour ? '00' : p.minute;
-      return `${p.year}-${p.month}-${p.day} ${p.hour}:${minute} ${p.timeZoneName}`;
+      return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute} ${p.timeZoneName}`;
+    }
+
+    function getETHourLabel(formattedTimestamp) {
+      // formattedTimestamp is produced by formatToET(): "YYYY-MM-DD HH:MM TZ"
+      // Extract just the 2-digit 24-hour hour, e.g. "14".
+      const timePart = formattedTimestamp.split(' ')[1] || '';
+      return timePart.split(':')[0] || '';
     }
 
     function setDefaultStartDate() {
-      const p = getETDateParts(new Date(), { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
-      dom.startDate.value = `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;
+      const p = getETDateParts(new Date(), {
+        year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hour12: false
+      });
+      document.getElementById('startDate').value = `${p.year}-${p.month}-${p.day}T${p.hour}:00`;
     }
 
-    /* =========================================================================
-       MAP
-    ========================================================================= */
-    function initMap() {
-      if (typeof L === 'undefined') {
-        document.getElementById('map').innerHTML =
-          '<div style="display:flex;align-items:center;justify-content:center;height:100%;padding:10px;text-align:center;color:#d9534f;font-size:12px;">Map library failed to load.</div>';
-        dom.statusMsg.innerText = 'Map library failed to load.';
-        return null;
-      }
+    /* =====================================================================
+       MAP INITIALIZATION & RENDER
+       ===================================================================== */
+    let map = null;
+    if (typeof L === 'undefined') {
+      document.getElementById('map').innerHTML =
+        '<div style="display:flex;align-items:center;justify-content:center;height:100%;padding:10px;text-align:center;color:#d9534f;font-size:12px;">Map library failed to load.</div>';
+      document.getElementById('statusMsg').innerText = 'Map library failed to load.';
+    } else {
+      map = L.map('map').setView([34.211, -76.944], 7);
 
-      const m = L.map('map').setView(CONFIG.mapCenter, CONFIG.mapZoom);
       L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}', {
         attribution: 'Tiles &copy; Esri',
         maxZoom: 13
-      }).addTo(m);
-      L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Reference/MapServer/tile/{z}/{y}/{x}', { maxZoom: 13 }).addTo(m);
+      }).addTo(map);
 
-      mapMarkersGroup = L.layerGroup().addTo(m);
-      return m;
+      L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Reference/MapServer/tile/{z}/{y}/{x}', {
+        maxZoom: 13
+      }).addTo(map);
+
+      mapMarkersGroup = L.layerGroup().addTo(map);
+      tideMarkerGroup = L.layerGroup().addTo(map);
     }
 
-    function haversineMiles(lat1, lon1, lat2, lon2) {
-      const toRad = deg => (deg * Math.PI) / 180;
-      const earthRadiusMiles = 3958.8;
-      const dLat = toRad(lat2 - lat1);
-      const dLon = toRad(lon2 - lon1);
-      const a = Math.sin(dLat / 2) ** 2 +
-        Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-      return 2 * earthRadiusMiles * Math.asin(Math.sqrt(a));
+    function getDistanceMiles(lat1, lon1, lat2, lon2) {
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLon = (lon2 - lon1) * Math.PI / 180;
+      const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                Math.sin(dLon / 2) * Math.sin(dLon / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return EARTH_RADIUS_MILES * c;
     }
 
-    // NDBC's station table is pipe-delimited; the coordinate column looks like
-    // "34.738 N 72.503 W (34°44'15" N 72°30'11" W)" — we only need the decimal part.
-    function parseStationTable(text) {
-      const stations = [];
-      for (const line of text.split('\n')) {
-        if (!line || line.startsWith('#')) continue;
-
-        const fields = line.split('|');
-        if (fields.length < 7) continue;
-
-        const id = fields[0].trim();
-        const name = fields[4].trim();
-        const match = fields[6] && fields[6].match(/([\d.]+)\s*([NS])\s+([\d.]+)\s*([EW])/);
-        if (!id || !match) continue;
-
-        const lat = parseFloat(match[1]) * (match[2] === 'S' ? -1 : 1);
-        const lon = parseFloat(match[3]) * (match[4] === 'W' ? -1 : 1);
-        if (isNaN(lat) || isNaN(lon)) continue;
-
-        stations.push({ id: id.toUpperCase(), name: name || id.toUpperCase(), lat, lon });
-      }
-      return stations;
-    }
-
-    async function loadStationTable() {
-      if (state.stationTable) return state.stationTable;
-      const response = await fetch(buildProxyUrl(CONFIG.stationTableUrl));
-      if (!response.ok) throw new Error(`HTTP ${response.status} fetching station table`);
-      state.stationTable = parseStationTable(await response.text());
-      return state.stationTable;
-    }
-
-    // Draws the active station plus every NDBC station within CONFIG.nearbyRadiusMiles —
-    // a translucent radius circle around the active buoy, and a marker per station with
-    // a hover tooltip and a click popup carrying a button to switch to that station.
-    function renderBuoysOnMap(stationList, activeStation) {
+    function renderBuoysOnMap(buoyList, targetBuoy) {
       if (!map || !mapMarkersGroup) return;
       mapMarkersGroup.clearLayers();
 
-      L.circle([activeStation.lat, activeStation.lon], {
-        radius: CONFIG.nearbyRadiusMiles * CONFIG.milesToMeters,
-        color: CONFIG.colors.windStem,
-        fillColor: CONFIG.colors.windStem,
+      L.circle([targetBuoy.lat, targetBuoy.lon], {
+        radius: NEARBY_BUOY_RADIUS_MILES * MILES_TO_METERS,
+        color: '#007bff',
+        fillColor: '#007bff',
         fillOpacity: 0.08,
         weight: 1.5,
         interactive: false
       }).addTo(mapMarkersGroup);
 
-      const nearbyStations = stationList.filter(s =>
-        haversineMiles(activeStation.lat, activeStation.lon, s.lat, s.lon) <= CONFIG.nearbyRadiusMiles
+      const nearbyBuoys = buoyList.filter(b =>
+        getDistanceMiles(targetBuoy.lat, targetBuoy.lon, b.lat, b.lon) <= NEARBY_BUOY_RADIUS_MILES
       );
 
-      const currentId = dom.windStationId.value.trim().toUpperCase();
+      const currentWaveId = document.getElementById('stationId').value.trim().toUpperCase();
+      const currentWindId = document.getElementById('windStationId').value.trim().toUpperCase();
 
-      nearbyStations.forEach(s => {
-        const dist = haversineMiles(activeStation.lat, activeStation.lon, s.lat, s.lon);
-        const isTarget = (s.id === currentId);
+      nearbyBuoys.forEach(b => {
+        const dist = getDistanceMiles(targetBuoy.lat, targetBuoy.lon, b.lat, b.lon);
+        const isWaveTarget = (b.id.toUpperCase() === currentWaveId);
+        const isWindTarget = (b.id.toUpperCase() === currentWindId);
 
-        const marker = L.circleMarker([s.lat, s.lon], {
-          radius: isTarget ? 8 : 6,
-          color: isTarget ? CONFIG.colors.gustPeak : CONFIG.colors.windStem,
-          fillColor: isTarget ? CONFIG.colors.gustPeak : CONFIG.colors.windStem,
+        let color = '#007bff';
+        let fillColor = '#3399ff';
+        if (isWaveTarget) {
+          color = '#d9534f';
+          fillColor = '#ff4d4d';
+        } else if (isWindTarget) {
+          color = '#28a745';
+          fillColor = '#5cb85c';
+        }
+
+        const marker = L.circleMarker([b.lat, b.lon], {
+          radius: (isWaveTarget || isWindTarget) ? 8 : 6,
+          color: color,
+          fillColor: fillColor,
           fillOpacity: 0.9,
           weight: 2,
           interactive: true
         }).addTo(mapMarkersGroup);
 
-        marker.bindTooltip(`Station ${s.id}`, { permanent: false, direction: 'top', offset: [0, -8] });
-        marker.bindPopup(`<b>Station ${s.id}</b><br>${s.name}<br>Distance: ${dist.toFixed(1)} miles<br><br>
-          <button onclick="setMapStation('${s.id}')" style="padding:4px 8px;font-size:10px;cursor:pointer;">Select Station</button>`);
+        marker.bindTooltip(`Station ${b.id}`, { permanent: false, direction: 'top', offset: [0, -8] });
+        marker.bindPopup(`<b>Station ${b.id}</b><br>${b.name}<br>Distance: ${dist.toFixed(1)} miles<br><br>
+          <button onclick="setMapStation('${b.id}', 'wave')" style="padding:4px 8px;font-size:10px;cursor:pointer;">Set Wave ID</button>
+          <button onclick="setMapStation('${b.id}', 'wind')" style="padding:4px 8px;font-size:10px;cursor:pointer;">Set Wind ID</button>
+        `);
       });
 
-      map.setView([activeStation.lat, activeStation.lon], map.getZoom());
+      map.setView([targetBuoy.lat, targetBuoy.lon], map.getZoom());
     }
 
-    function setMapStation(id) {
-      dom.windStationId.value = id;
+    // Marks the NOAA tide-prediction station the heatmap's tide overlay is
+    // currently using (see TIDE OVERLAY section below). Lives in its own layer
+    // group, separate from mapMarkersGroup, so a buoy-list re-render (which
+    // clears mapMarkersGroup) never wipes it out. Pass null to clear it, e.g.
+    // when the Show Tide toggle is switched off.
+    function renderTideStationMarker(station) {
+      if (!map || !tideMarkerGroup) return;
+      tideMarkerGroup.clearLayers();
+      if (!station) return;
+
+      const marker = L.circleMarker([station.lat, station.lon], {
+        radius: 8,
+        color: '#ffffff',
+        fillColor: TIDE_LINE_COLOR,
+        fillOpacity: 1,
+        weight: 2.5,
+        interactive: true
+      }).addTo(tideMarkerGroup);
+
+      marker.bindTooltip(`Tide: ${station.name}`, { permanent: false, direction: 'top', offset: [0, -8] });
+      marker.bindPopup(`<b>Tide Station ${station.id}</b><br>${station.name}<br>Distance from buoy: ${station.distanceMiles.toFixed(1)} miles`);
+    }
+
+    function setMapStation(id, type) {
+      if (type === 'wave') {
+        document.getElementById('stationId').value = id;
+      } else {
+        document.getElementById('windStationId').value = id;
+      }
       fetchAndProcessData();
     }
 
-    // Looks up the active station plus its NDBC neighbors and (re)draws them on the map.
-    async function updateNearbyStations(rawStationId) {
-      try {
-        const table = await loadStationTable();
-        const activeId = rawStationId.trim().toUpperCase();
-        const active = table.find(s => s.id === activeId);
-        if (!active) return;
+    /* =====================================================================
+       NOAA DATA FETCHING
+       ===================================================================== */
+    // Returns the resolved { lat, lon } of activeStationId (also stashed in
+    // currentBuoyLocation, since the tide overlay needs it later — after this
+    // call returns, e.g. when the user flips the Show Tide toggle post-fetch).
+    async function updateDynamicBuoyDatabase(activeStationId) {
+      const targetUrl = "https://www.ndbc.noaa.gov/activestations.xml";
 
-        renderBuoysOnMap(table, active);
+      try {
+        const response = await fetch(buildProxyUrl(targetUrl));
+        if (!response.ok) throw new Error("Could not fetch active NOAA stations database.");
+
+        const xmlText = await response.text();
+        const parser = new DOMParser();
+        const xmlDoc = parser.parseFromString(xmlText, "text/xml");
+        const stationNodes = xmlDoc.getElementsByTagName("station");
+
+        const allStations = [];
+        let targetBuoy = null;
+
+        for (let i = 0; i < stationNodes.length; i++) {
+          const node = stationNodes[i];
+          const id = node.getAttribute("id") ? node.getAttribute("id").toUpperCase() : "";
+          const lat = parseFloat(node.getAttribute("lat"));
+          const lon = parseFloat(node.getAttribute("lon"));
+          const name = node.getAttribute("name") || `Station ${id}`;
+
+          if (!isNaN(lat) && !isNaN(lon)) {
+            const stationObj = { id, name: `${id} - ${name}`, lat, lon };
+            allStations.push(stationObj);
+            if (id === activeStationId.toUpperCase()) targetBuoy = stationObj;
+          }
+        }
+
+        if (!targetBuoy) throw new Error("Target buoy not found in active XML list.");
+        renderBuoysOnMap(allStations, targetBuoy);
+        currentBuoyLocation = { lat: targetBuoy.lat, lon: targetBuoy.lon };
+        return currentBuoyLocation;
+
       } catch (err) {
-        console.warn('Could not load nearby NDBC stations:', err);
+        console.warn("Using fallback local database for markers:", err);
+        const searchId = activeStationId.toUpperCase();
+        const targetBuoy = fallbackBuoyDatabase.find(b => b.id === searchId) ||
+          { id: searchId, name: `Station ${searchId}`, lat: 34.211, lon: -76.944 };
+
+        renderBuoysOnMap(fallbackBuoyDatabase, targetBuoy);
+        currentBuoyLocation = { lat: targetBuoy.lat, lon: targetBuoy.lon };
+        return currentBuoyLocation;
       }
     }
 
-    /* =========================================================================
-       DATA FETCH & PARSE (NOAA NDBC realtime2 format)
-    ========================================================================= */
+    async function fetchNDBCFile(stationId, ext) {
+      const targetUrl = `https://www.ndbc.noaa.gov/data/realtime2/${stationId}.${ext}`;
+      const response = await fetch(buildProxyUrl(targetUrl));
+
+      if (!response.ok) {
+        if (response.status === 404) {
+          throw new Error(`Station ${stationId} has no .${ext} file (HTTP 404).`);
+        }
+        throw new Error(`HTTP ${response.status} fetching .${ext}`);
+      }
+
+      const text = await response.text();
+      if (!text || text.trim().length === 0 || text.includes("403 Forbidden")) {
+        throw new Error(`Invalid data payload received for .${ext}`);
+      }
+
+      return parseNDBCFormat(text);
+    }
+
     async function fetchWindData(windStationId) {
       const targetUrl = `https://www.ndbc.noaa.gov/data/realtime2/${windStationId}.txt`;
       const response = await fetch(buildProxyUrl(targetUrl));
-      if (!response.ok) throw new Error(`HTTP ${response.status} fetching station ${windStationId}`);
+
+      if (!response.ok) {
+        if (response.status === 404) {
+          throw new Error(`Wind Station ${windStationId} not found (HTTP 404).`);
+        }
+        throw new Error(`HTTP ${response.status} fetching wind data for ${windStationId}`);
+      }
+
       const text = await response.text();
+      if (!text || text.trim().length === 0 || text.includes("403 Forbidden")) {
+        throw new Error(`Invalid payload for Wind Station ${windStationId}`);
+      }
+
       return parseNDBCWindFormat(text);
     }
 
-    // NDBC realtime2 columns: YY MM DD hh mm WDIR WSPD GST WVHT DPD APD MWD PRES
-    // ATMP WTMP DEWP VIS TIDE — ATMP (air temp, °C) is column index 13; "MM" marks
-    // a missing reading and parses to NaN, same as the other optional fields here.
     function parseNDBCWindFormat(text) {
-      const records = [];
+      const lines = text.trim().split('\n');
+      const windMap = new Map();
 
-      for (let line of text.trim().split('\n')) {
+      for (let line of lines) {
         line = line.trim();
-        if (!line || line.startsWith('#')) continue;
+        if (line.startsWith('#') || !line) continue;
 
         const parts = line.split(/\s+/);
         if (parts.length < 8) continue;
 
-        const [year, month, day, hour, minute] = parts;
+        const year = parts[0];
+        const month = parts[1];
+        const day = parts[2];
+        const hour = parts[3];
+        const minute = parts[4];
+
         const wdir = parseFloat(parts[5]);
         const wspd = parseFloat(parts[6]);
         const gst = parseFloat(parts[7]);
-        const atmpC = parts.length > 13 ? parseFloat(parts[13]) : NaN;
-
-        if (isNaN(wdir) || isNaN(wspd)) continue;
 
         const utcDate = new Date(Date.UTC(year, month - 1, day, hour, minute));
-        const wspdKts = wspd * CONFIG.mpsToKnots;
-        const gstKts = !isNaN(gst) ? gst * CONFIG.mpsToKnots : wspdKts;
+        const formattedTimestamp = formatToET(utcDate);
 
-        records.push({
-          timestamp: formatToET(utcDate),
-          rawDate: utcDate,
-          fromDir: wdir,
-          speedKts: wspdKts,
-          gustKts: gstKts,
-          atmpF: isNaN(atmpC) ? null : (atmpC * 9 / 5 + 32)
-        });
-      }
-      return records;
-    }
+        if (!isNaN(wdir) && !isNaN(wspd)) {
+          const wspdKts = wspd * MPS_TO_KNOTS;
+          const gstKts = !isNaN(gst) ? gst * MPS_TO_KNOTS : wspdKts;
 
-    /* =========================================================================
-       NWS FORECAST (api.weather.gov gridpoint data)
-       The same 2.5 km NDFD grid behind the forecast.weather.gov graphical page, but as
-       JSON. Each layer (windSpeed, windDirection, windGust, temperature) is a list of
-       { validTime: "2026-09-20T18:00:00+00:00/PT4H", value } intervals of uneven length;
-       they are expanded to one value per clock hour here, converted to kts / deg F, and
-       kept in Maps keyed by that hour's epoch ms so the table can look hours up directly.
-    ========================================================================= */
-    // "PT4H" -> 14400000, "P1DT6H" -> 108000000 (days, hours, minutes only - all NWS uses here).
-    function parseIsoDurationMs(iso) {
-      const m = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?)?$/.exec(iso || '');
-      if (!m) return 0;
-      return ((+m[1] || 0) * 24 + (+m[2] || 0)) * 3600000 + (+m[3] || 0) * 60000;
-    }
+          const towardsDir = (wdir + 180) % 360;
 
-    function nwsLayerToHourly(layer, convert) {
-      const hourly = new Map();
-      if (!layer || !Array.isArray(layer.values)) return hourly;
-      for (const item of layer.values) {
-        if (item.value === null || item.value === undefined || isNaN(item.value)) continue;
-        const [startIso, durIso] = String(item.validTime).split('/');
-        const startMs = Date.parse(startIso);
-        const durMs = parseIsoDurationMs(durIso);
-        if (isNaN(startMs) || !durMs) continue;
-        for (let ms = Math.ceil(startMs / 3600000) * 3600000; ms < startMs + durMs; ms += 3600000) {
-          hourly.set(ms, convert(item.value));
+          windMap.set(formattedTimestamp, {
+            fromDir: wdir,
+            towardsDir: towardsDir,
+            speedKts: wspdKts,
+            gustKts: gstKts
+          });
         }
       }
-      return hourly;
+      return windMap;
     }
 
-    // Two calls, the first cached per station: /points/{lat},{lon} -> gridpoint URL, then the
-    // gridpoint itself. The station's coordinates come from the NDBC station table.
-    async function fetchNwsForecast(stationId) {
-      const table = await loadStationTable();
-      const station = table.find(s => s.id === stationId);
-      if (!station) throw new Error(`no coordinates known for station ${stationId}`);
+    function parseNDBCFormat(text) {
+      const lines = text.trim().split('\n');
+      const timestamps = [];
+      let frequencies = [];
+      const matrices = [];
 
-      let gridUrl = state.forecastGridUrls[stationId];
-      if (!gridUrl) {
-        // NWS wants at most 4 decimal places; more triggers a redirect.
-        const pointRes = await fetch(`${CONFIG.nwsApiBase}/points/${station.lat.toFixed(4)},${station.lon.toFixed(4)}`);
-        if (!pointRes.ok) throw new Error(`NWS points lookup failed (HTTP ${pointRes.status})`);
-        gridUrl = (await pointRes.json()).properties.forecastGridData;
-        state.forecastGridUrls[stationId] = gridUrl;
-      }
+      for (let line of lines) {
+        line = line.trim();
+        if (line.startsWith('#') || !line) continue;
 
-      const gridRes = await fetch(gridUrl);
-      if (!gridRes.ok) throw new Error(`NWS gridpoint fetch failed (HTTP ${gridRes.status})`);
-      const p = (await gridRes.json()).properties;
+        const parts = line.split(/\s+/);
+        if (parts.length < 6) continue;
 
-      return {
-        stationId,
-        fetchedAt: Date.now(),
-        speedKts: nwsLayerToHourly(p.windSpeed, v => v * CONFIG.kmhToKnots),
-        gustKts: nwsLayerToHourly(p.windGust, v => v * CONFIG.kmhToKnots),
-        dirDeg: nwsLayerToHourly(p.windDirection, v => v),   // "from" bearing, same as NDBC WDIR
-        tempF: nwsLayerToHourly(p.temperature, v => v * 9 / 5 + 32)
-      };
-    }
+        const matches = [...line.matchAll(/([-+]?\d+(?:\.\d+)?)\s+\(([-+]?\d+(?:\.\d+)?)\)/g)];
+        if (matches.length === 0) continue;
 
-    // Fire-and-forget after the observed frames are up: the dashboard never waits on (or
-    // fails because of) the forecast. On any failure the table just shows no forecast columns.
-    async function loadForecast(rawStationId) {
-      const stationId = rawStationId.trim().toUpperCase();
-      const requestId = ++state.forecastRequestId;
-      const cached = state.forecastData;
-      const fresh = cached && cached.stationId === stationId && Date.now() - cached.fetchedAt < CONFIG.forecastMaxAgeMs;
-
-      if (!fresh) {
-        try {
-          const data = await fetchNwsForecast(stationId);
-          if (requestId !== state.forecastRequestId) return;   // a newer load superseded this one
-          state.forecastData = data;
-        } catch (err) {
-          if (requestId !== state.forecastRequestId) return;
-          state.forecastData = null;
-          console.warn('NWS forecast unavailable:', err);
+        if (frequencies.length === 0) {
+          frequencies = matches.map(m => parseFloat(m[2]));
         }
+
+        const utcDate = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2], parts[3], parts[4]));
+        timestamps.push(formatToET(utcDate));
+        matrices.push(matches.map(m => parseFloat(m[1])));
       }
-
-      renderHourlyTable();
-      const n = getForecastColumns().length;
-      dom.statusMsg.innerText = n
-        ? `Loaded ${state.frames.length} hourly frames + ${n}h NWS forecast.`
-        : `Loaded ${state.frames.length} hourly frames (no NWS forecast for this station).`;
+      return { timestamps, frequencies, matrices };
     }
 
-    // One entry per forecast hour, starting the hour after the last observed frame. Empty if
-    // there's no forecast for this station, or NWS has nothing for that first hour (e.g. the
-    // window ends too far in the past for the forecast grid to reach back to it) - columns
-    // must join up with the observations, so a gap means no forecast columns at all.
-    function getForecastColumns() {
-      const fd = state.forecastData;
-      const last = state.frames[state.frames.length - 1];
-      if (!fd || !last || fd.stationId !== state.frameStationId || !isFinite(last.hourStartMs)) return [];
-
-      const start = last.hourStartMs + 3600000;
-      const has = ms => [fd.speedKts, fd.gustKts, fd.dirDeg, fd.tempF].some(m => m.has(ms));
-      if (!has(start)) return [];
-
-      const cols = [];
-      for (let i = 0; i < CONFIG.forecastHours; i++) {
-        const ms = start + i * 3600000;
-        cols.push({
-          hourStartMs: ms,
-          meanKts: fd.speedKts.has(ms) ? fd.speedKts.get(ms) : null,
-          gustKts: fd.gustKts.has(ms) ? fd.gustKts.get(ms) : null,
-          dirDeg: fd.dirDeg.has(ms) ? fd.dirDeg.get(ms) : null,
-          tempF: fd.tempF.has(ms) ? fd.tempF.get(ms) : null
-        });
-      }
-      while (cols.length && !has(cols[cols.length - 1].hourStartMs)) cols.pop();   // NWS ran out
-      return cols;
-    }
-
-    /* =========================================================================
-       STATISTICS
-    ========================================================================= */
-    function computeStats(vals) {
-      if (!vals.length) return { meanVal: 0, minVal: 0, maxVal: 0, stdVal: 0 };
-      const meanVal = vals.reduce((a, b) => a + b, 0) / vals.length;
-      const variance = vals.reduce((a, b) => a + (b - meanVal) ** 2, 0) / vals.length;
-      return {
-        meanVal,
-        minVal: Math.min(...vals),
-        maxVal: Math.max(...vals),
-        stdVal: Math.sqrt(variance)
-      };
-    }
-
-    // Mean & spread of a set of compass directions, handling the 0/360 wraparound.
-    function computeCircularStats(dirs) {
-      if (!dirs.length) return { meanDir: 0, dirStdDeg: 0 };
-
-      let sumSin = 0, sumCos = 0;
-      for (const d of dirs) {
-        const rad = (d * Math.PI) / 180;
-        sumSin += Math.sin(rad);
-        sumCos += Math.cos(rad);
-      }
-
-      const meanRad = Math.atan2(sumSin / dirs.length, sumCos / dirs.length);
-      let meanDir = (meanRad * 180) / Math.PI;
-      if (meanDir < 0) meanDir += 360;
-
-      const meanResultantLength = Math.sqrt(sumSin * sumSin + sumCos * sumCos) / dirs.length;
-      const dirStdRad = Math.sqrt(Math.max(0, -2 * Math.log(meanResultantLength)));
-      const dirStdDeg = (dirStdRad * 180) / Math.PI;
-
-      return { meanDir, dirStdDeg: isNaN(dirStdDeg) ? 0 : dirStdDeg };
-    }
-
-    /* =========================================================================
-       FRAME BUILDING
-       Turns raw records for a time window into one summarized frame per hour.
-    ========================================================================= */
-    function groupRecordsByHour(records) {
-      const buckets = new Map();
-      for (const rec of records) {
-        if (!buckets.has(rec.timestamp)) buckets.set(rec.timestamp, []);
-        buckets.get(rec.timestamp).push(rec);
-      }
-      return buckets;
-    }
-
-    function dirRangeAroundMean(dirs, meanDir) {
-      const offsets = dirs.map(d => ((d - meanDir + 540) % 360) - 180);
-      return { minDir: meanDir + Math.min(...offsets), maxDir: meanDir + Math.max(...offsets) };
-    }
-
-    function buildHourlyFrame(timestamp, records) {
-      const speeds = records.map(r => r.speedKts);
-      const gusts = records.map(r => r.gustKts);
-      const dirs = records.map(r => r.fromDir);
-      const temps = records.map(r => r.atmpF).filter(t => t !== null && !isNaN(t));
-
-      const windStats = computeStats(speeds);
-      const gustStats = computeStats(gusts);
-      const { meanDir, dirStdDeg } = computeCircularStats(dirs);
-
-      const hourlyPeakRecord = records.reduce(
-        (peak, rec) => (rec.gustKts > peak.gustKts ? rec : peak),
-        records[0]
-      );
-
-      return {
-        timestamp,
-        // Start of the clock hour this frame covers, as epoch ms (ET offsets are whole hours,
-        // so flooring the UTC time is exact) - lets forecast columns pick up right after it.
-        hourStartMs: Math.floor(records[0].rawDate.getTime() / 3600000) * 3600000,
-        windStats,
-        gustStats,
-        meanDir,
-        dirStdDeg,
-        // Range ends measured as signed offsets from the circular mean, so a spread that
-        // straddles north (e.g. 355..15) stays a narrow 20-degree wedge through 0 instead
-        // of a plain min/max giving 15..355 - a 340-degree wedge the long way round.
-        // minDir can come out negative / maxDir over 360; Plotly wraps theta fine.
-        ...dirRangeAroundMean(dirs, meanDir),
-        hourlyPeakGust: hourlyPeakRecord.gustKts,
-        hourlyPeakGustDir: hourlyPeakRecord.fromDir,
-        // Every individual gust reading in this hour, for the raw scatter plot —
-        // one point per NDBC observation rather than a summarized range/fan.
-        gustPoints: records.map(r => ({ gustKts: r.gustKts, fromDir: r.fromDir })),
-        // Every individual wind-speed reading in the hour, for the violin plot.
-        windSpeeds: speeds,
-        // Mean air temp for the hour, or null if ATMP was missing from every reading.
-        atmpF: temps.length ? temps.reduce((a, b) => a + b, 0) / temps.length : null
-      };
-    }
-
-    function buildHourlyFrames(records, targetTime) {
-      const buckets = groupRecordsByHour(records);
-      const targetHourKey = formatToET(new Date(targetTime));
-
-      const frames = [];
-      let maxGustInPeriod = CONFIG.minGustAxis;
-      let currentFrame = null;
-
-      for (const [timestamp, bucketRecords] of buckets.entries()) {
-        const frame = buildHourlyFrame(timestamp, bucketRecords);
-        maxGustInPeriod = Math.max(maxGustInPeriod, frame.gustStats.maxVal);
-
-        if (timestamp === targetHourKey) {
-          // This bucket covers the hour the window ends in, which may still be in
-          // progress. Relabel it with its latest reading's exact time and hold it
-          // aside so it always lands as one extra frame after the complete hours,
-          // instead of just blending into a generic "HH:00" bucket.
-          const latestRecord = bucketRecords.reduce((a, b) => (b.rawDate > a.rawDate ? b : a));
-          frame.timestamp = formatToET(latestRecord.rawDate, { roundToHour: false });
-          currentFrame = frame;
-        } else {
-          frames.push(frame);
-        }
-      }
-
-      if (currentFrame) frames.push(currentFrame);
-
-      return { frames, maxGustAxis: Math.ceil(maxGustInPeriod * CONFIG.axisPaddingFactor) };
-    }
-
-    function getTargetTime(settings) {
-      return settings.startDate ? new Date(settings.startDate).getTime() : Date.now();
-    }
-
-    function filterToWindow(records, settings, targetTime) {
-      const windowStartTime = targetTime - settings.hoursToPlot * 60 * 60 * 1000;
-
-      return records
-        .filter(r => r.rawDate.getTime() >= windowStartTime && r.rawDate.getTime() <= targetTime)
-        .sort((a, b) => a.rawDate - b.rawDate);
-    }
-
-    /* =========================================================================
-       FETCH -> PROCESS ORCHESTRATION
-    ========================================================================= */
     async function fetchAndProcessData() {
       pause();
-      if (state.autoEndDate) setDefaultStartDate();
+      const status = document.getElementById('statusMsg');
       const settings = getUserSettings();
-      updateNearbyStations(settings.windStationId);
 
       try {
-        dom.statusMsg.innerText = `Fetching wind data for ${settings.windStationId}...`;
+        status.innerText = `Locating nearby wave buoys within ${NEARBY_BUOY_RADIUS_MILES}mi...`;
+        await updateDynamicBuoyDatabase(settings.stationId);
 
-        const targetTime = getTargetTime(settings);
-        const windRecords = await fetchWindData(settings.windStationId);
-        const windowed = filterToWindow(windRecords, settings, targetTime);
+        status.innerText = "Fetching buoy and wind data...";
 
-        if (windowed.length === 0) throw new Error('No wind records found in selected window.');
+        let windErrorMsg = null;
+        const [spec, alpha1, alpha2] = await Promise.all([
+          fetchNDBCFile(settings.stationId, 'data_spec'),
+          fetchNDBCFile(settings.stationId, 'swdir'),
+          fetchNDBCFile(settings.stationId, 'swdir2')
+        ]);
 
-        const { frames, maxGustAxis: autoMaxGustAxis } = buildHourlyFrames(windowed, targetTime);
-        state.frames = frames;
-        state.frameStationId = settings.windStationId.trim().toUpperCase();
-        // Manual Max Axis (kts) wins when the user has set one; otherwise fall back to
-        // the data-driven autoscale. Either way, refresh the placeholder with the live
-        // auto value so clearing the box (or zooming from here) has a reference point.
-        state.maxGustAxis = settings.axisMaxKt != null ? settings.axisMaxKt : autoMaxGustAxis;
-        dom.axisMaxKt.placeholder = `Auto (${autoMaxGustAxis})`;
-        state.frameIdx = frames.length - 1;
+        try {
+          windTimeSeriesMap = await fetchWindData(settings.windStationId);
+        } catch (wErr) {
+          windTimeSeriesMap = new Map();
+          windErrorMsg = wErr.message;
+          alert(`Wind Data Warning: ${wErr.message}`);
+        }
 
-        dom.timeSlider.max = frames.length - 1;
-        dom.timeSlider.value = state.frameIdx;
+        status.innerText = "Processing spectral matrices...";
+
+        let startIndex = 0;
+        if (settings.startDate) {
+          const targetTime = new Date(settings.startDate).getTime();
+          const foundIdx = spec.timestamps.findIndex(ts => new Date(ts).getTime() <= targetTime);
+          startIndex = foundIdx === -1 ? 0 : foundIdx;
+        }
+
+        const endIndex = Math.min(startIndex + settings.hoursToPlot, spec.timestamps.length);
+        timeSeriesData = [];
+
+        for (let i = endIndex - 1; i >= startIndex; i--) {
+          const ts = spec.timestamps[i];
+          timeSeriesData.push({
+            timestamp: ts,
+            frequencies: spec.frequencies,
+            energy: spec.matrices[i],
+            alpha1: alpha1.matrices[i],
+            alpha2: alpha2.matrices[i],
+            wind: windTimeSeriesMap.get(ts) || null
+          });
+        }
+
+        if (timeSeriesData.length === 0) {
+          throw new Error("No data found for the selected start date.");
+        }
+
+        const slider = document.getElementById('timeSlider');
+        slider.max = timeSeriesData.length - 1;
+        slider.value = timeSeriesData.length - 1;
+        currentFrameIdx = timeSeriesData.length - 1;
+
+        // Tide overlay is optional and best-effort: its own try/catch keeps a
+        // failure here (e.g. the proxy not allowing the NOAA tides domain
+        // through) from blocking the wave/wind data that already succeeded.
+        let tideErrorMsg = null;
+        if (document.getElementById('showTide').checked) {
+          status.innerText = "Loading tide data...";
+          try {
+            await loadTideDataForCurrentWindow();
+          } catch (tErr) {
+            tideData = null;
+            resolvedTideStation = null;
+            renderTideStationMarker(null);
+            tideErrorMsg = tErr.message;
+            console.warn("Tide overlay unavailable:", tErr);
+          }
+        } else {
+          tideData = null;
+          resolvedTideStation = null;
+          renderTideStationMarker(null);
+        }
 
         renderCurrentFrame();
-        dom.statusMsg.innerText = `Loaded ${frames.length} hourly frames.`;
-        loadForecast(settings.windStationId);   // async and non-blocking; adds forecast columns when it lands
+        const notes = [windErrorMsg && `Wind warning: ${windErrorMsg}`, tideErrorMsg && `Tide warning: ${tideErrorMsg}`]
+          .filter(Boolean).join(' | ');
+        status.innerText = notes ? `Wave data updated (${notes})` : "Updated successfully.";
+
       } catch (err) {
-        dom.statusMsg.innerText = 'Fetch error.';
-        alert('Error fetching wind data: ' + err.message);
+        status.innerText = "Fetch error.";
+        alert("Error fetching buoy or dynamic metadata: " + err.message);
       }
     }
 
-    /* =========================================================================
-       PLOT TRACE BUILDERS
-    ========================================================================= */
-    function generateArcTheta(startAngle, endAngle, steps = 30) {
-      const diff = endAngle - startAngle;
-      const thetas = [];
-      for (let i = 0; i <= steps; i++) {
-        thetas.push(startAngle + diff * (i / steps));
+    /* =====================================================================
+       TIDE OVERLAY (heatmap only)
+       ===================================================================== */
+    // Reconstructs the exact UTC instant a formatToET() string represents.
+    // formatToET always renders with timeZoneName:'short', so the trailing
+    // token is reliably "EDT" (UTC-4) or "EST" (UTC-5) — no DST ambiguity to
+    // resolve, since the abbreviation already tells us which is in effect.
+    function parseETTimestampToUTC(formattedTimestamp) {
+      const [datePart, timePart, tz] = formattedTimestamp.split(' ');
+      const [y, m, d] = datePart.split('-').map(Number);
+      const [hh, mm] = timePart.split(':').map(Number);
+      const offsetHours = tz === 'EDT' ? 4 : 5;
+      return Date.UTC(y, m - 1, d, hh, mm) + offsetHours * 3600000;
+    }
+
+    function formatNOAADateUTC(utcMs) {
+      const d = new Date(utcMs);
+      const y = d.getUTCFullYear();
+      const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+      const day = String(d.getUTCDate()).padStart(2, '0');
+      return `${y}${m}${day}`;
+    }
+
+    // Finds the closest NOAA tide-prediction station to a lat/lon, reusing the
+    // same haversine distance function as the buoy map. The full station list
+    // (a few thousand entries, global) is fetched once and cached; the resolved
+    // nearest station per location is cached too, since it never changes for a
+    // given wave buoy.
+    async function findNearestTideStation(lat, lon) {
+      const cacheKey = `${lat.toFixed(3)},${lon.toFixed(3)}`;
+      if (nearestTideStationCache.has(cacheKey)) return nearestTideStationCache.get(cacheKey);
+
+      if (!tideStationListCache) {
+        const response = await fetch(buildProxyUrl(TIDE_STATIONS_URL));
+        if (!response.ok) throw new Error(`HTTP ${response.status} fetching tide station list`);
+        const json = await response.json();
+        tideStationListCache = (json.stations || []).filter(s => isFinite(s.lat) && isFinite(s.lng));
+        if (tideStationListCache.length === 0) throw new Error("Tide station list was empty");
       }
-      return thetas;
+
+      let nearest = null;
+      let nearestDist = Infinity;
+      for (const s of tideStationListCache) {
+        const dist = getDistanceMiles(lat, lon, s.lat, s.lng);
+        if (dist < nearestDist) {
+          nearestDist = dist;
+          nearest = { id: s.id, name: s.name, lat: s.lat, lon: s.lng, distanceMiles: dist };
+        }
+      }
+
+      if (nearest) nearestTideStationCache.set(cacheKey, nearest);
+      return nearest;
     }
 
-    function createWedgeTrace(arcTheta, minVal, maxVal, fillColor, lineColor, label) {
-      const arcThetaRev = [...arcTheta].reverse();
-      return {
-        type: 'scatterpolar', mode: 'lines', fill: 'toself',
-        fillcolor: fillColor, line: { color: lineColor, width: 1.5 },
-        r: [...arcTheta.map(() => maxVal), ...arcThetaRev.map(() => minVal), maxVal],
-        theta: [...arcTheta, ...arcThetaRev, arcTheta[0]],
-        name: label, showlegend: false
-      };
+    // Fetches high/low tide predictions (not the full 6-minute curve — we only
+    // need the extrema; see interpolateTideHeight for how the smooth shape
+    // between them is reconstructed) for a window padded around what's currently
+    // plotted, and populates the module-level tideData used by renderHeatmap().
+    async function loadTideDataForCurrentWindow() {
+      if (!currentBuoyLocation) throw new Error("No wave buoy location resolved yet");
+      if (!timeSeriesData.length) throw new Error("No wave data loaded yet");
+
+      const station = await findNearestTideStation(currentBuoyLocation.lat, currentBuoyLocation.lon);
+      if (!station) throw new Error("No nearby tide station found");
+
+      const earliestUTC = parseETTimestampToUTC(timeSeriesData[0].timestamp);
+      const latestUTC = parseETTimestampToUTC(timeSeriesData[timeSeriesData.length - 1].timestamp);
+      const beginDate = formatNOAADateUTC(earliestUTC - TIDE_QUERY_PADDING_MS);
+      const endDate = formatNOAADateUTC(latestUTC + TIDE_QUERY_PADDING_MS);
+
+      const targetUrl = `${TIDE_PREDICTIONS_URL}?product=predictions&application=WaveDash` +
+        `&begin_date=${beginDate}&end_date=${endDate}&datum=MLLW&station=${station.id}` +
+        `&time_zone=gmt&units=english&interval=hilo&format=json`;
+
+      const response = await fetch(buildProxyUrl(targetUrl));
+      if (!response.ok) throw new Error(`HTTP ${response.status} fetching tide predictions for station ${station.id}`);
+
+      const json = await response.json();
+      if (json.error) throw new Error(json.error.message || "NOAA tide API returned an error");
+      if (!json.predictions || json.predictions.length < 2) {
+        throw new Error(`Not enough tide predictions returned for station ${station.id}`);
+      }
+
+      tideData = json.predictions
+        .map(p => ({ utcMs: Date.parse(p.t.replace(' ', 'T') + 'Z'), height: parseFloat(p.v) }))
+        .filter(p => isFinite(p.utcMs) && isFinite(p.height))
+        .sort((a, b) => a.utcMs - b.utcMs);
+
+      if (tideData.length < 2) throw new Error("Tide predictions failed to parse");
+
+      resolvedTideStation = station;
+      renderTideStationMarker(resolvedTideStation);
     }
 
-    function createThresholdRingTrace(radiusVal, labelName, color) {
-      const ringThetas = generateArcTheta(0, 360, 60);
+    // Raised-cosine interpolation between the two bracketing hi/lo events — the
+    // standard smooth approximation of a semidiurnal tide curve between known
+    // extrema, which is exactly the shape we want without needing 6-minute data.
+    function interpolateTideHeight(utcMs, tidePoints) {
+      if (!tidePoints || tidePoints.length < 2) return null;
+      if (utcMs <= tidePoints[0].utcMs) return tidePoints[0].height;
+      if (utcMs >= tidePoints[tidePoints.length - 1].utcMs) return tidePoints[tidePoints.length - 1].height;
+
+      for (let i = 0; i < tidePoints.length - 1; i++) {
+        const a = tidePoints[i], b = tidePoints[i + 1];
+        if (utcMs >= a.utcMs && utcMs <= b.utcMs) {
+          const t = (utcMs - a.utcMs) / (b.utcMs - a.utcMs);
+          return a.height + (b.height - a.height) * (1 - Math.cos(t * Math.PI)) / 2;
+        }
+      }
+      return null;
+    }
+
+    // Builds the tide overlay trace for the heatmap: one interpolated height per
+    // existing hourly column (so it rides the same categorical x-axis as the
+    // heatmap — no separate axis needed), min-max scaled into the period-limit
+    // range purely for visual placement. Unitless by design: we only care about
+    // relative high/low and rising/falling, never an exact value (per the ask).
+    function buildTideOverlayTrace(xValues, periodLimit) {
+      if (!tideData || tideData.length < 2) return null;
+
+      const heights = xValues.map(ts => interpolateTideHeight(parseETTimestampToUTC(ts), tideData));
+      if (heights.some(h => h === null || !isFinite(h))) return null;
+
+      const minH = Math.min(...heights);
+      const maxH = Math.max(...heights);
+      const range = (maxH - minH) || 1; // guard a degenerate/flat window
+      // Scaled against the heatmap's actual visible span (HEATMAP_MIN_PERIOD_S to
+      // periodLimit), not the full 0-to-periodLimit range — the axis itself is
+      // floored at HEATMAP_MIN_PERIOD_S (see renderHeatmap), so this keeps the
+      // tide line inset within the same plotted area instead of the portion
+      // below the floor that's no longer part of the visible axis.
+      const axisSpan = Math.max(periodLimit - HEATMAP_MIN_PERIOD_S, 0);
+      const margin = axisSpan * 0.08; // inset from the heatmap's own top/bottom axis edges
+      const usableRange = Math.max(axisSpan - margin * 2, 0);
+      const scaledY = heights.map(h => HEATMAP_MIN_PERIOD_S + margin + ((h - minH) / range) * usableRange);
+
       return {
-        type: 'scatterpolar',
+        type: 'scatter',
         mode: 'lines',
-        r: ringThetas.map(() => radiusVal),
-        theta: ringThetas,
-        name: labelName,
-        hoverinfo: 'name',
-        showlegend: false,
-        line: { color, width: 2.5 }
-      };
-    }
-
-    function buildThresholdTraces(frame, settings) {
-      const traces = [];
-      if (settings.foilKt > 0 && settings.foilKt <= state.maxGustAxis) {
-        traces.push(createThresholdRingTrace(settings.foilKt, `Foil (${settings.foilKt} kts)`, CONFIG.colors.thresholdFoil));
-      }
-      if (settings.windsurfKt > 0 && settings.windsurfKt <= state.maxGustAxis) {
-        traces.push(createThresholdRingTrace(settings.windsurfKt, `Windsurf (${settings.windsurfKt} kts)`, CONFIG.colors.thresholdWindsurf));
-      }
-      return traces;
-    }
-
-    // Raw scatter of every individual gust reading in the hour, rather than a
-    // summarized range/fan wedge — each point at its own (gust speed, direction).
-    function buildGustTraces(frame) {
-      const c = CONFIG.colors;
-      const points = frame.gustPoints || [];
-
-      return [{
-        type: 'scatterpolar', mode: 'markers',
-        r: points.map(p => p.gustKts),
-        theta: points.map(p => p.fromDir),
-        name: 'Gust Readings',
-        hoverinfo: 'text',
-        hovertext: points.map(p => `${p.gustKts.toFixed(1)} kts @ ${Math.round(p.fromDir)}°`),
-        marker: { size: 7, color: c.gustScatter, line: { width: 0 } },
+        x: xValues,
+        y: scaledY,
+        line: { color: TIDE_LINE_COLOR, width: 2.5, shape: 'spline' },
+        name: 'Tide',
+        hoverinfo: 'skip',
         showlegend: false
-      }];
-    }
-
-    /* Split violin in polar coordinates (optional, "Violin plot" checkbox).
-       One violin whose axis runs out from the center along the hour's mean wind
-       direction: radius = speed, and the angular half-width at each radius is the
-       kernel density of readings at that speed. Wind speeds (blue) fill the
-       counterclockwise half, gusts (red) the clockwise half, so the two
-       distributions sit back to back on a shared speed axis. Each half spans its
-       own min..max reading (no tails past the data). Both halves share one width
-       scale, so each encloses the same angular "area" and a tight, peaky
-       distribution shows up wider than a spread-out one - just like a normal
-       violin. Direction spread isn't shown in this mode (the whole thing is
-       pinned to the mean direction); uncheck to get the range wedge and gust
-       scatter back. */
-    function kdeCurve(values, steps) {
-      const v = values.filter(Number.isFinite);
-      if (!v.length) return null;
-      const n = v.length;
-      const mean = v.reduce((a, b) => a + b, 0) / n;
-      const sd = Math.sqrt(v.reduce((a, b) => a + (b - mean) ** 2, 0) / Math.max(1, n - 1));
-      // Silverman's rule-of-thumb bandwidth.
-      const h = Math.max(CONFIG.violin.minBandwidthKt, 1.06 * sd * Math.pow(n, -0.2));
-      let lo = Math.min(...v), hi = Math.max(...v);
-      if (hi - lo < 1e-6) { lo = Math.max(0, lo - h); hi = hi + h; }
-      const rs = [], dens = [];
-      for (let i = 0; i <= steps; i++) {
-        const r = lo + (hi - lo) * (i / steps);
-        let d = 0;
-        for (const x of v) { const z = (r - x) / h; d += Math.exp(-0.5 * z * z); }
-        rs.push(r);
-        dens.push(d / (n * h * Math.sqrt(2 * Math.PI)));
-      }
-      return { rs, dens };
-    }
-
-    // One half of the violin as a closed polygon: out along the axis, back along the
-    // density edge. side = -1 is counterclockwise (angularaxis runs clockwise), +1 clockwise.
-    function violinHalfTrace(curve, axisDir, side, scale, colors, name) {
-      const edgeTheta = curve.dens.map(d => axisDir + side * d * scale);
-      return {
-        type: 'scatterpolar', mode: 'lines', fill: 'toself',
-        r: [...curve.rs, ...[...curve.rs].reverse(), curve.rs[0]],
-        theta: [...curve.rs.map(() => axisDir), ...[...edgeTheta].reverse(), axisDir],
-        fillcolor: colors.fill, line: { color: colors.line, width: 1.5 },
-        name, hoverinfo: 'name', showlegend: false
       };
     }
 
-    function buildViolinTraces(frame) {
-      const c = CONFIG.colors, vc = CONFIG.violin;
-      const wind = kdeCurve(frame.windSpeeds || [], vc.steps);
-      const gust = kdeCurve((frame.gustPoints || []).map(p => p.gustKts), vc.steps);
-      const peak = Math.max(...(wind ? wind.dens : [0]), ...(gust ? gust.dens : [0]));
-      if (!(peak > 0)) return [];
-      const scale = vc.maxHalfWidthDeg / peak;
-      const traces = [];
-      if (gust) traces.push(violinHalfTrace(gust, frame.meanDir, +1, scale, c.violinGust, 'Gust distribution'));
-      if (wind) traces.push(violinHalfTrace(wind, frame.meanDir, -1, scale, c.violinWind, 'Wind distribution'));
-      return traces;
-    }
+    // Lets the toggle take effect immediately without requiring a full Update —
+    // tide data is tied to the buoy location + plotted window, not the current
+    // frame, so switching it on just needs one fetch (or the cache), not a re-fetch
+    // of wave/wind data.
+    async function onShowTideToggle() {
+      if (!timeSeriesData.length) return;
+      const checked = document.getElementById('showTide').checked;
+      const status = document.getElementById('statusMsg');
 
-    // Mean wind arrow, styled after Wave Dash's wind arrow: a stem reaching out to the
-    // mean speed along the compass bearing the wind is coming FROM, tipped with a real
-    // arrowhead marker planted at the center and rotated to point the direction the
-    // wind is actually blowing TOWARD (fromDir + 180). The stem starts a little short of
-    // center (headLen) so it doesn't poke through the arrowhead glyph.
-    function buildWindArrowTraces(frame) {
-      const c = CONFIG.colors;
-      const meanDir = frame.meanDir;
-      const arrowLength = frame.windStats.meanVal;
-      const headLen = state.maxGustAxis * CONFIG.arrowHeadLenFactor;
-
-      const traces = [];
-
-      if (arrowLength >= headLen) {
-        traces.push({
-          type: 'scatterpolar', mode: 'lines',
-          r: [headLen, arrowLength], theta: [meanDir, meanDir],
-          name: 'Wind Mean Vector', hoverinfo: 'none',
-          line: { color: c.windStem, width: 3.5 }, showlegend: false
-        });
+      if (!checked) {
+        tideData = null;
+        resolvedTideStation = null;
+        renderTideStationMarker(null);
+        renderCurrentFrame();
+        return;
       }
 
-      traces.push({
-        type: 'scatterpolar', mode: 'markers',
-        r: [0], theta: [meanDir],
-        name: 'Wind Arrowhead', hoverinfo: 'none',
-        marker: { size: 22, symbol: 'arrow', angle: (meanDir + 180) % 360, color: c.windStem },
-        showlegend: false
-      });
-
-      // Blue dot at the stem's outer end - the mean wind speed and direction point itself,
-      // matching the red peak-gust dot (same size).
-      traces.push({
-        type: 'scatterpolar', mode: 'markers',
-        r: [arrowLength], theta: [meanDir],
-        name: 'Mean Wind', hoverinfo: 'text',
-        text: [`Mean ${Math.round(arrowLength)}kt from ${Math.round(meanDir)}\u00b0`],
-        marker: { size: 12, color: c.windStem, symbol: 'circle' },
-        showlegend: false
-      });
-
-      return traces;
-    }
-
-    // The wind range wedge (min..max direction and speed over the hour) plus the mean
-    // wind arrow. (A second, narrower mean +/- 1 std-dev wedge used to be drawn on top of
-    // the range wedge; it was dropped as redundant/confusing, and the range wedge took
-    // over its stronger blue.)
-    function buildWindTraces(frame, settings) {
-      const c = CONFIG.colors;
-      if (settings && settings.violin) return buildWindArrowTraces(frame); // violin replaces the range wedge
-      const rangeArc = generateArcTheta(frame.minDir, frame.maxDir);
-
-      return [
-        createWedgeTrace(rangeArc, frame.windStats.minVal, frame.windStats.maxVal, c.windRange.fill, c.windRange.line, 'Wind Range'),
-        ...buildWindArrowTraces(frame)
-      ];
-    }
-
-    // A same-colored text label offset circumferentially (counterclockwise) from the true
-    // (r, theta) at the same radius, so it doesn't crowd the point it belongs to. A radial
-    // offset used to push the period's peak gust (which sits at the axis limit) off the
-    // plot; sliding along the ring keeps it inside. A fixed CONFIG.pointLabelAngleDeg
-    // swing keeps it clear of the gust point cloud around the marker.
-    function buildPointLabel(r, theta, color, text, name) {
-      // angularaxis runs clockwise, so counterclockwise = decreasing theta.
-      const labelTheta = ((theta - CONFIG.pointLabelAngleDeg) % 360 + 360) % 360;
-      return {
-        type: 'scatterpolar', mode: 'text',
-        r: [r], theta: [labelTheta],
-        name, text: [text],
-        textposition: 'middle center',
-        textfont: { color, size: 15, weight: 'bold' },
-        // A label at the outer ring still overhangs it by half its height - don't let the
-        // polar axes clip that away.
-        cliponaxis: false,
-        hoverinfo: 'none', showlegend: false
-      };
-    }
-
-    // A marker at the true (r, theta) plus a same-colored text label offset counterclockwise
-    // along the same ring (see buildPointLabel), so the label doesn't crowd the marker.
-    function buildPointWithLabel(r, theta, color, text, name) {
-      return [
-        {
-          type: 'scatterpolar', mode: 'markers',
-          r: [r], theta: [theta],
-          name, hoverinfo: 'text', text: [text],
-          marker: { size: 12, color, symbol: 'circle' },
-          showlegend: false
-        },
-        buildPointLabel(r, theta, color, text, name)
-      ];
-    }
-
-    function buildPeakGustLabel(frame) {
-      return buildPointWithLabel(
-        frame.hourlyPeakGust, frame.hourlyPeakGustDir,
-        CONFIG.colors.gustPeak, `${Math.round(frame.hourlyPeakGust)}kt`,
-        'Hourly Peak Gust'
-      );
-    }
-
-    // Rotates the wind label through the four compass quadrants so it never sits on
-    // top of the arrow it's labeling — same quadrant logic as Wave Dash's wind label.
-    function windLabelPosition(fromDir) {
-      const dir = fromDir % 360;
-      if (dir >= 135 && dir <= 225) return 'bottom center';
-      if (dir > 45 && dir < 135) return 'middle right';
-      if (dir > 225 && dir < 315) return 'middle left';
-      return 'top center';
-    }
-
-    // Just the label — the wind arrow's stem already terminates at this point, so no
-    // separate marker "bubble" is drawn here. Speed only — gust is already covered by
-    // the Hourly Peak Gust label, so it's left out here.
-    // The arrowhead glyph is planted at the plot's center pointing downwind (see
-    // buildWindArrowTraces) — that glyph, not the stem's far end, is the arrow's actual
-    // tip; the stem's outer end (out at r=arrowLength) is just its blunt tail. So the
-    // label sits near the center too, a small fixed gap past the arrowhead on the
-    // downwind side, rather than out at the tail — which also keeps it well clear of
-    // the Peak Gust (red) label out near the gust radius.
-    function buildMeanWindLabel(frame) {
-      const meanDir = frame.meanDir;
-      const arrowLength = frame.windStats.meanVal;
-      const tipDir = (meanDir + 180) % 360;
-      // Reuses arrowHeadLenFactor (the same radius the stem itself is kept clear of,
-      // per buildWindArrowTraces) so the label sits just past the arrowhead glyph's own
-      // footprint rather than a gap tuned for a different spot on the plot.
-      const labelRadius = state.maxGustAxis * CONFIG.arrowHeadLenFactor;
-
-      return [{
-        type: 'scatterpolar', mode: 'text',
-        r: [labelRadius], theta: [tipDir],
-        text: [`${Math.round(arrowLength)}kt`],
-        textposition: windLabelPosition(tipDir),
-        textfont: { color: CONFIG.colors.windStem, size: 17, weight: 'bold' },
-        name: 'Mean Wind Speed', hoverinfo: 'text', showlegend: false
-      }];
-    }
-
-    // Plotly's built-in radial tick labels can render upside down depending on where the
-    // axis line sits, so we hide them (see buildPolarLayout) and draw our own instead —
-    // plain scatterpolar text never gets auto-rotated, so it always stays upright.
-    function buildRadialAxisLabels() {
-      const axisTheta = 180; // S — matches where the radial axis line sits, and stays clear
-                              // of the Wind stats card pinned in the NE corner
-      const steps = CONFIG.radialGridlines;
-      const labels = [];
-      for (let i = 0; i <= steps; i++) {
-        const val = Math.round((state.maxGustAxis / steps) * i);
-        labels.push({
-          type: 'scatterpolar', mode: 'text',
-          r: [val], theta: [axisTheta],
-          text: [`${val} kts`],
-          textposition: 'middle right',
-          textfont: { color: '#6c757d', size: 9 },
-          hoverinfo: 'none', showlegend: false
-        });
+      status.innerText = "Loading tide data...";
+      try {
+        await loadTideDataForCurrentWindow();
+        status.innerText = "Updated successfully.";
+      } catch (err) {
+        tideData = null;
+        resolvedTideStation = null;
+        renderTideStationMarker(null);
+        console.warn("Tide overlay unavailable:", err);
+        status.innerText = `Tide warning: ${err.message}`;
       }
-      return labels;
-    }
-
-    function buildPolarLayout() {
-      return {
-        polar: {
-          angularaxis: {
-            direction: 'clockwise', rotation: 90,
-            tickmode: 'array', tickvals: [0, 45, 90, 135, 180, 225, 270, 315],
-            ticktext: ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
-          },
-          radialaxis: {
-            range: [0, state.maxGustAxis], angle: -180, showgrid: true,
-            showticklabels: false, ticks: '', nticks: CONFIG.radialGridlines
-          }
-        },
-        showlegend: false,
-        // No legend any more, so the old 45px bottom margin is reclaimed. The top/side
-        // margins are wider than a bare polar plot needs: they leave room for the peak-gust
-        // label, which can sit just outside the outer ring (see buildPointLabel).
-        margin: { t: 45, b: 30, l: 40, r: 40 }, autosize: true
-      };
-    }
-
-    /* =========================================================================
-       RENDERING
-    ========================================================================= */
-    function formatKts(val) { return `${val.toFixed(1)} kts`; }
-    function formatKtsMean(meanVal, stdVal) { return `${meanVal.toFixed(1)} ± ${stdVal.toFixed(1)} kts`; }
-    function formatDeg(val) { return `${Math.round(val)}°`; }
-    function formatDegMean(meanVal, stdVal) { return `${Math.round(meanVal)}° ± ${Math.round(stdVal)}°`; }
-    function formatTempF(val) { return (val === null || isNaN(val)) ? '–' : `${Math.round(val)}°F`; }
-
-    // "2026-09-15 14:23 EDT" -> "2:23 PM". The most recent frame can land on a
-    // non-":00" minute (see buildHourlyFrames), so this keeps the exact minute
-    // rather than always showing an on-the-hour label.
-    function formatHourLabel(timestamp) {
-      const timePart = timestamp.split(' ')[1] || '';
-      const [hhStr, mmStr] = timePart.split(':');
-      let hh = parseInt(hhStr, 10);
-      const period = hh >= 12 ? 'PM' : 'AM';
-      hh = hh % 12;
-      if (hh === 0) hh = 12;
-      return `${hh}:${mmStr} ${period}`;
-    }
-
-    // Compact formats for the hourly table — narrow screens don't have room for
-    // units or AM/PM, so these drop everything not needed to read the value.
-    function formatTempCompact(val) { return (val === null || isNaN(val)) ? '–' : `${Math.round(val)}`; }
-    // "2026-09-15 14:23 EDT" -> "14" — bare 24-hour hour, minutes dropped even for
-    // the current (possibly mid-hour) frame.
-    function formatHourCompact(timestamp) {
-      const timePart = timestamp.split(' ')[1] || '';
-      const hhStr = timePart.split(':')[0] || '';
-      return hhStr.padStart(2, '0');
-    }
-
-    function updateStatsPanel(frame) {
-      const s = dom.stat;
-      s.wMean.innerText = formatKtsMean(frame.windStats.meanVal, frame.windStats.stdVal);
-      s.wDir.innerText = formatDegMean(frame.meanDir, frame.dirStdDeg);
-      // Title-bar "20g24": this hour's mean wind (blue) and peak gust (red), whole knots.
-      const mean = frame.windStats.meanVal, gust = frame.hourlyPeakGust;
-      const hasMean = Number.isFinite(mean), hasGust = Number.isFinite(gust);
-      s.wTitleMean.style.color = CONFIG.colors.windStem;
-      s.wTitleGust.style.color = CONFIG.colors.gustPeak;
-      s.wTitleMean.innerText = hasMean ? Math.round(mean) : '';
-      s.wTitleG.innerText = hasMean && hasGust ? 'g' : '';
-      s.wTitleGust.innerText = hasGust ? Math.round(gust) : '';
-    }
-
-    function renderCurrentFrame() {
-      if (!state.frames.length) return;
-
-      const settings = getUserSettings();
-      const frame = state.frames[state.frameIdx];
-
-      dom.timestampDisplay.innerText = frame.timestamp;
-      updateStatsPanel(frame);
-
-      // Layer order matters: threshold rings, then gust (bottom), then wind (on top), then point labels.
-      const traces = [
-        ...buildThresholdTraces(frame, settings),
-        // Violin mode swaps the gust scatter + wind range wedge for the split violin.
-        ...(settings.violin ? buildViolinTraces(frame) : buildGustTraces(frame)),
-        ...buildWindTraces(frame, settings),
-        ...buildPeakGustLabel(frame),
-        ...buildMeanWindLabel(frame),
-        ...buildRadialAxisLabels()
-      ];
-
-      Plotly.newPlot(dom.plotEl, traces, buildPolarLayout(), CONFIG.plotly);
-
-      renderHourlyTable();
-    }
-
-    /* =========================================================================
-       HOURLY TABLE
-       A meteogram strip below the plot: one column per hourly frame, with the
-       active column (the frame currently on the polar plot) boxed in blue.
-       Rows: Hour / Dir (mouse-pointer arrow) / a Mean + Peak Gust line plot /
-       Temp. After the last observed hour come NWS forecast columns (see NWS FORECAST). Rebuilt in full on every render rather than patched in place - the
-       frame count is small enough that this is simpler and plenty fast.
-    ========================================================================= */
-
-    // The classic mouse-pointer outline (tip at 0,0, drawn pointing up-left),
-    // pre-centered on its bounding box so it can be spun around its middle.
-    // POINTER.tipBearing is the compass-style bearing (clockwise from up) the
-    // un-rotated shape points at, so pointing it at bearing B means rotating by
-    // B - tipBearing.
-    const POINTER = (() => {
-      const shape = [[0, 0], [0, 16], [3.6, 12.6], [6.2, 18.6], [8.6, 17.6], [6, 11.8], [11, 11.8]];
-      const xs = shape.map(p => p[0]), ys = shape.map(p => p[1]);
-      const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
-      const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
-      return {
-        points: shape.map(([x, y]) => `${(x - cx).toFixed(2)},${(y - cy).toFixed(2)}`).join(' '),
-        tipBearing: Math.atan2(0 - cx, cy - 0) * 180 / Math.PI
-      };
-    })();
-
-    // A mouse-pointer arrow centered in its cell, pointing along compass bearing
-    // `pointToDir`. Direction only - speed lives in the plot row below it.
-    function windPointerSvg(pointToDir, fill = '#333') {
-      if (!isFinite(pointToDir)) return '&ndash;';
-      const rot = (pointToDir - POINTER.tipBearing).toFixed(1);
-      return `<svg class="hb-pointer" viewBox="-14 -14 28 28" width="22" height="22">
-        <polygon points="${POINTER.points}" transform="rotate(${rot})" fill="${fill}" stroke="#fff" stroke-width="1" stroke-linejoin="round"/>
-      </svg>`;
-    }
-
-    // Local (ET) hour-of-day and weekday for an epoch-ms hour. h23 so midnight is 0, not 24.
-    const etHourFormatter = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hourCycle: 'h23', hour: '2-digit', weekday: 'short' });
-    function etHourInfo(ms) {
-      if (!isFinite(ms)) return null;
-      const parts = {};
-      etHourFormatter.formatToParts(new Date(ms)).forEach(p => { parts[p.type] = p.value; });
-      return { hour: parseInt(parts.hour, 10) % 24, weekday: parts.weekday };
-    }
-
-    // One <td> spanning every hour column (observed, then forecast), holding a Mean (blue) +
-    // Peak Gust (red) line plot in the same colors as the polar plot. Because the table is
-    // table-layout:fixed, the N columns are equal width, so hour i sits at exactly
-    // (i + 0.5) / N of this cell's width - the SVG's viewBox is N*COL wide with
-    // preserveAspectRatio="none" so it stretches to whatever that width is, and
-    // every stroke/dot uses vector-effect="non-scaling-stroke" so the stretch
-    // can't squash the lines or turn the dots into ovals. Forecast hours continue each line
-    // as a solid, lighter-shaded segment (bridged from the last observed point) over a tinted band.
-    function buildHourlyPlotCell(frames, fc) {
-      const obsN = frames.length;
-      const N = obsN + fc.length;
-      const H = CONFIG.hourlyTable.plotHeightPx;
-      const COL = 100, PAD_TOP = 10, PAD_BOTTOM = 12;   // bottom pad leaves room for the "NWS forecast" tag under the 0 line
-      const c = CONFIG.colors;
-      const finite = v => v !== null && v !== undefined && isFinite(v);
-
-      const means = [...frames.map(f => f.windStats.meanVal), ...fc.map(f => f.meanKts)];
-      const gusts = [...frames.map(f => f.hourlyPeakGust), ...fc.map(f => f.gustKts)];
-      const dataMax = Math.max(0, ...means.filter(finite), ...gusts.filter(finite));
-      const step = [1, 2, 5, 10, 20, 50, 100].find(s => dataMax / s <= 4) || 100;   // <= 4 gridlines
-      const yMax = Math.max(step, Math.ceil(dataMax / step) * step);
-      const yOf = v => PAD_TOP + (1 - v / yMax) * (H - PAD_TOP - PAD_BOTTOM);
-      const xOf = i => (i + 0.5) * COL;
-
-      const ticks = [];
-      for (let v = 0; v <= yMax; v += step) ticks.push(v);
-
-      const fmt = p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`;
-      const pointsOf = (vals, from, to) => {
-        const pts = [];
-        for (let i = from; i < to; i++) if (finite(vals[i])) pts.push([xOf(i), yOf(vals[i])]);
-        return pts;
-      };
-      const lineSvg = (pts, color, extra = '') => pts.length > 1
-        ? `<polyline points="${pts.map(fmt).join(' ')}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" vector-effect="non-scaling-stroke" ${extra}/>`
-        : '';
-      // A zero-length segment with round caps = a round dot that ignores the SVG's non-uniform stretch.
-      const dotsSvg = (pts, color, size, opacity) => pts.map(p =>
-        `<path d="M${fmt(p)} l0.01,0" stroke="${color}" stroke-width="${size}" stroke-linecap="round" stroke-opacity="${opacity}" vector-effect="non-scaling-stroke"/>`
-      ).join('');
-
-      const series = (vals, color, forecastColor) => {
-        const obs = pointsOf(vals, 0, obsN);
-        const ahead = pointsOf(vals, obsN, N);
-        let svg = lineSvg(obs, color) + dotsSvg(obs, color, 5, 1);
-        if (ahead.length) {
-          const bridged = obs.length ? [obs[obs.length - 1], ...ahead] : ahead;   // joins up with the last observed point
-          svg += lineSvg(bridged, forecastColor) + dotsSvg(ahead, forecastColor, 5, 1);
-        }
-        return svg;
-      };
-
-      const grid = ticks.map(v =>
-        `<line x1="0" x2="${N * COL}" y1="${yOf(v).toFixed(1)}" y2="${yOf(v).toFixed(1)}" stroke="${v === 0 ? '#ced4da' : '#dfe3e8'}" stroke-width="1" vector-effect="non-scaling-stroke"/>`
-      ).join('');
-      // Whole-knot speed under each blue point (under, not over: the gust line runs above the mean).
-      // HTML spans rather than SVG <text>, which the SVG's stretch-to-fit would distort.
-      const speedLabels = means.map((v, i) => finite(v)
-        ? `<span class="hb-plot-val" style="left:${((i + 0.5) / N * 100).toFixed(3)}%;top:${yOf(v).toFixed(1)}px;color:${c.windStem}">${Math.round(v)}</span>`
-        : ''
-      ).join('');
-      const tickLabels = ticks.map(v =>
-        `<span class="hb-plot-tick" style="top:${(yOf(v) / H * 100).toFixed(2)}%">${v}</span>`
-      ).join('');
-
-      // Forecast band + the dashed "now" divider, and a dotted line at each midnight (the weekday
-      // names themselves live in the Day row above the table's Hour row).
-      const band = fc.length
-        ? `<rect x="${obsN * COL}" y="0" width="${fc.length * COL}" height="${H}" fill="#f4f6f8"/>` +
-          `<line x1="${obsN * COL}" x2="${obsN * COL}" y1="0" y2="${H}" stroke="#adb5bd" stroke-width="1" stroke-dasharray="4 3" vector-effect="non-scaling-stroke"/>`
-        : '';
-      const hourInfo = [...frames.map(f => etHourInfo(f.hourStartMs)), ...fc.map(f => etHourInfo(f.hourStartMs))];
-      let midnights = '';
-      hourInfo.forEach((info, i) => {
-        if (i === 0 || !info || info.hour !== 0) return;
-        midnights += `<line x1="${i * COL}" x2="${i * COL}" y1="0" y2="${H}" stroke="#ced4da" stroke-width="1" stroke-dasharray="1 3" vector-effect="non-scaling-stroke"/>`;
-      });
-      const fcTag = fc.length
-        ? `<span class="hb-plot-tag" style="left:calc(${(obsN / N * 100).toFixed(3)}% + 4px)">NWS forecast for ${state.frameStationId}</span>`
-        : '';
-
-      return `<td class="hb-plot-cell" colspan="${N}" onclick="hourlyPlotClick(event, ${N}, ${obsN})">
-        <div class="hb-plot-box" style="height:${H}px">
-          <svg viewBox="0 0 ${N * COL} ${H}" preserveAspectRatio="none" aria-hidden="true">
-            ${band}${grid}${midnights}${series(gusts, c.gustPeak, c.gustPeakForecast)}${series(means, c.windStem, c.windStemForecast)}
-          </svg>
-          ${tickLabels}${speedLabels}${fcTag}
-        </div>
-      </td>`;
-    }
-
-    // The plot row is one wide cell, so a click is mapped back to an hour column by its
-    // horizontal position within the cell. Forecast columns (index >= obsN) have no frame
-    // to jump to, so clicks there are ignored.
-    function hourlyPlotClick(ev, count, obsCount) {
-      const rect = ev.currentTarget.getBoundingClientRect();
-      const idx = Math.floor((ev.clientX - rect.left) / rect.width * count);
-      if (idx < 0 || idx >= obsCount) return;
-      jumpToFrame(idx);
-    }
-
-    // The header row of weekday names: one cell per calendar day (ET), spanning that day's hour
-    // columns - observed and forecast alike, so a day that straddles "now" is one cell. The name
-    // is a sticky child so it stays in view, just right of the row-label column, while a long
-    // day is scrolled past.
-    function buildDayRow(hourStartMsList) {
-      const segments = [];
-      hourStartMsList.forEach((ms, i) => {
-        const info = etHourInfo(ms);
-        if (segments.length && (!info || (info.hour !== 0))) { segments[segments.length - 1].span++; return; }
-        segments.push({ weekday: info ? info.weekday : '', span: 1 });
-      });
-      const stickyLeft = CONFIG.hourlyTable.labelColPx + 3;
-      const cells = segments.map((s, k) =>
-        `<td colspan="${s.span}" class="hb-day${k ? ' hb-day-start' : ''}">` +
-        `<span class="hb-day-label" style="left:${stickyLeft}px">${s.span >= 2 ? s.weekday : s.weekday.charAt(0)}</span></td>`
-      ).join('');
-      return `<tr class="hb-day-row"><th class="hb-row-label" scope="row"></th>${cells}</tr>`;
-    }
-
-    function renderHourlyTable() {
-      const frames = state.frames;
-      if (!frames.length) { dom.hourlyTable.innerHTML = ''; return; }
-
-      const fc = getForecastColumns();
-      const N = frames.length + fc.length;
-      const T = CONFIG.hourlyTable;
-      // Below this width the table scrolls sideways (see .hourly-table-wrap) instead of squeezing.
-      dom.hourlyTable.style.minWidth = `${T.labelColPx + N * T.minColPx}px`;
-
-      const FC_POINTER_FILL = '#8a949e';   // forecast pointers: same shape, lighter than observed
-      const ROWS = [
-        { label: 'Hour', rowClass: 'hb-hour-row',
-          obs: f => formatHourCompact(f.timestamp),
-          fc: f => String(etHourInfo(f.hourStartMs).hour).padStart(2, '0') },
-        // Points the way the wind is blowing TOWARD, like the polar plot's arrowhead
-        // (meanDir is where it's coming FROM). Drop the +180 to point at the source instead.
-        { label: 'Dir',
-          obs: f => windPointerSvg((f.meanDir + 180) % 360),
-          fc: f => windPointerSvg(f.dirDeg === null ? NaN : (f.dirDeg + 180) % 360, FC_POINTER_FILL) },
-        { plot: true },
-        { label: 'Temp',
-          obs: f => formatTempCompact(f.atmpF),
-          fc: f => formatTempCompact(f.tempF) }
-      ];
-
-      let html = `<colgroup><col style="width:${T.labelColPx}px"></colgroup>`;
-      html += buildDayRow([...frames.map(f => f.hourStartMs), ...fc.map(f => f.hourStartMs)]);
-      ROWS.forEach(row => {
-        if (row.plot) {
-          html += `<tr><th class="hb-row-label hb-plot-label" scope="row">` +
-                  `<span style="color:${CONFIG.colors.gustPeak}">Gust</span><br>` +
-                  `<span style="color:${CONFIG.colors.windStem}">Mean</span></th>` +
-                  `${buildHourlyPlotCell(frames, fc)}</tr>`;
-          return;
-        }
-        html += `<tr class="${row.rowClass || ''}"><th class="hb-row-label" scope="row">${row.label}</th>`;
-        frames.forEach((frame, i) => {
-          html += `<td onclick="jumpToFrame(${i})">${row.obs(frame)}</td>`;
-        });
-        fc.forEach((col, k) => {
-          html += `<td class="hb-fcst${k === 0 ? ' hb-fcst-start' : ''}">${row.fc(col)}</td>`;
-        });
-        html += `</tr>`;
-      });
-
-      dom.hourlyTable.innerHTML = html;
-
-      // The table's width follows the window, so keep the box glued to its column on resize too.
-      if (!hourlyResizeObserver && typeof ResizeObserver !== 'undefined') {
-        hourlyResizeObserver = new ResizeObserver(positionHourlyActiveBox);
-        hourlyResizeObserver.observe(dom.hourlyTable);
-      }
-      positionHourlyActiveBox();
-      scrollHourlyActiveIntoView();
-    }
-
-    let hourlyResizeObserver = null;
-
-    // The active column's cell in the Hour row (+1 skips the row-label <th>).
-    function getActiveHourCell() {
-      const row = dom.hourlyTable.querySelector('tr.hb-hour-row');
-      return row ? row.cells[state.frameIdx + 1] : null;
-    }
-
-    // Draws the single blue box over the active hour's column, top to bottom of the whole
-    // table, using the column's measured geometry (so it stays exact at fractional widths).
-    function positionHourlyActiveBox() {
-      const box = dom.hourlyActiveBox;
-      const cell = getActiveHourCell();
-      if (!cell) { box.style.display = 'none'; return; }
-      const inner = box.parentElement.getBoundingClientRect();
-      const table = dom.hourlyTable.getBoundingClientRect();
-      const c = cell.getBoundingClientRect();
-      box.style.left = `${c.left - inner.left}px`;
-      box.style.top = `${table.top - inner.top}px`;
-      box.style.width = `${c.width}px`;
-      box.style.height = `${table.height}px`;
-      box.style.display = 'block';
-    }
-
-    // Keeps the current hour on screen as playback advances (or the slider moves) by sliding
-    // the table so the active column sits in the middle of the visible area, i.e. the part
-    // not covered by the sticky label column. Does nothing when the whole table already fits.
-    function scrollHourlyActiveIntoView() {
-      const wrap = dom.hourlyWrap;
-      const cell = getActiveHourCell();
-      if (!cell || wrap.scrollWidth <= wrap.clientWidth) return;
-      const labelPx = CONFIG.hourlyTable.labelColPx;
-      const cellCenter = cell.getBoundingClientRect().left - dom.hourlyActiveBox.parentElement.getBoundingClientRect().left
-                         + cell.getBoundingClientRect().width / 2;
-      const target = cellCenter - (labelPx + (wrap.clientWidth - labelPx) / 2);
-      wrap.scrollTo({ left: Math.max(0, target), behavior: 'smooth' });
-    }
-
-    /* =========================================================================
-       PLAYBACK CONTROLS
-    ========================================================================= */
-    function getPlaybackInterval() {
-      return dom.speedSelect ? parseInt(dom.speedSelect.value) : CONFIG.defaultPlaybackMs;
-    }
-
-    // Clicking a column in the hourly table jumps straight to that hour, same as
-    // scrubbing the slider — and, like scrubbing, stops any active playback.
-    function jumpToFrame(idx) {
-      pause();
-      goToFrame(idx);
-    }
-
-    function goToFrame(idx) {
-      state.frameIdx = Math.max(0, Math.min(state.frames.length - 1, idx));
-      dom.timeSlider.value = state.frameIdx;
       renderCurrentFrame();
     }
 
-    // Button labels for the Play/Pause toggle (same inline-SVG icons as the static buttons).
-    const PLAY_BTN_HTML = '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 3v10l9-5z"/></svg> Play';
-    const PAUSE_BTN_HTML = '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3" width="3" height="10"/><rect x="9.5" y="3" width="3" height="10"/></svg> Pause';
+    /* =====================================================================
+       SPECTRAL ANALYSIS & CHARTS
+       ===================================================================== */
+    // Trapezoidal integral of energy density over frequency, between array
+    // indices i0 and i1 inclusive (i0 <= i1). Used both for the per-swell band
+    // integration below and for full-spectrum Hs if ever needed for debugging.
+    function trapzIntegral(freqsArr, energyArr, i0, i1) {
+      let total = 0;
+      for (let i = i0; i < i1; i++) {
+        total += 0.5 * (energyArr[i] + energyArr[i + 1]) * (freqsArr[i + 1] - freqsArr[i]);
+      }
+      return total;
+    }
 
-    function togglePlay() { state.isPlaying ? pause() : play(); }
+    // Significant wave height from the zeroth spectral moment (variance), the
+    // standard Hs = 4*sqrt(m0) relation — no PM/JONSWAP shape assumed, since
+    // m0 here comes directly from integrating the measured curve.
+    function hsFromM0(m0) {
+      return 4 * Math.sqrt(Math.max(m0, 0));
+    }
+
+    // Overall significant wave height (the same quantity NDBC reports as
+    // WVHT) for a frame, in feet — m0 integrated across the *entire* reported
+    // spectrum (all frequency bins), unlike the per-swell band heights in
+    // analyzeFrame() which are confined to the swell-detection window. NDBC's
+    // realtime2 spectral files (.data_spec) don't carry WVHT as its own
+    // field, so this is computed directly from the same energy/frequency
+    // arrays already fetched for the plots — no extra request needed. Same
+    // Hs = 4*sqrt(m0) relation the per-swell heights use (see hsFromM0 and
+    // the CHANGELOG note on validating that approach against NDBC's own
+    // reported WVHT), just integrated over the full spectrum instead of one
+    // swell's band.
+    function computeSignificantWaveHeightFt(frame) {
+      const m0 = trapzIntegral(frame.frequencies, frame.energy, 0, frame.frequencies.length - 1);
+      return hsFromM0(m0) * M_TO_FT;
+    }
+
+    // First index whose frequency is >= target (clamped to the last index).
+    // Used to locate the outer band edges from PEAK_DETECT_MIN/MAX_FREQ_HZ
+    // without assuming a fixed bin layout — different NDBC buoys report
+    // different (non-uniform) frequency arrays.
+    function indexAtOrAfter(freqsArr, target) {
+      for (let i = 0; i < freqsArr.length; i++) {
+        if (freqsArr[i] >= target) return i;
+      }
+      return freqsArr.length - 1;
+    }
+
+    // Last index whose frequency is <= target (clamped to index 0).
+    function indexAtOrBefore(freqsArr, target) {
+      for (let i = freqsArr.length - 1; i >= 0; i--) {
+        if (freqsArr[i] <= target) return i;
+      }
+      return 0;
+    }
+
+    // Per-swell significant wave height via band integration of the *measured*
+    // spectrum — no Pierson-Moskowitz/JONSWAP shape assumed. Each selected
+    // peak's band runs from the trough (local energy minimum) shared with its
+    // neighboring peak to the trough shared with its other neighbor; the two
+    // outermost bands are capped at the existing swell detection window
+    // (PEAK_DETECT_MIN/MAX_FREQ_HZ) rather than running out to the edge of the
+    // full spectrum, so a swell's height reflects only the swell band it was
+    // detected in, not adjacent wind-sea/chop energy.
+    //
+    // Returns a Map from peak index -> band m0 (m^2), keyed the same way as
+    // selectedPeakIndices so callers can look up each selected peak's result.
+    function computeSwellBandM0(frame, selectedPeakIndices) {
+      const freqsArr = frame.frequencies;
+      const energyArr = frame.energy;
+      const loBound = indexAtOrAfter(freqsArr, PEAK_DETECT_MIN_FREQ_HZ);
+      const hiBound = indexAtOrBefore(freqsArr, PEAK_DETECT_MAX_FREQ_HZ);
+
+      const byFreq = [...selectedPeakIndices].sort((a, b) => freqsArr[a] - freqsArr[b]);
+      const bounds = [loBound];
+      for (let k = 0; k < byFreq.length - 1; k++) {
+        const a = byFreq[k], b = byFreq[k + 1];
+        let troughIdx = b;
+        let troughEnergy = energyArr[b];
+        for (let i = a + 1; i < b; i++) {
+          if (energyArr[i] < troughEnergy) {
+            troughEnergy = energyArr[i];
+            troughIdx = i;
+          }
+        }
+        bounds.push(troughIdx);
+      }
+      bounds.push(hiBound);
+
+      const m0ByIndex = new Map();
+      for (let k = 0; k < byFreq.length; k++) {
+        m0ByIndex.set(byFreq[k], trapzIntegral(freqsArr, energyArr, bounds[k], bounds[k + 1]));
+      }
+      return m0ByIndex;
+    }
+
+    // Beach-break wave face height estimate (empirical, ~1:30 beach slope):
+    // H_face ≈ 0.72 * H0^0.8 * T^0.4 — H0 and T must be in SI units (meters,
+    // seconds) for this fit; the result comes back in meters too, so it's
+    // converted to feet by the caller alongside everything else.
+    function estimateFaceHeightM(heightM, periodS) {
+      if (!isFinite(heightM) || heightM <= 0 || !isFinite(periodS) || periodS <= 0) return 0;
+      return 0.72 * Math.pow(heightM, 0.8) * Math.pow(periodS, 0.4);
+    }
+
+    function analyzeFrame(frame, peakThreshold) {
+      const freqs = frame.frequencies;
+      const periods = freqs.map(f => 1 / f);
+      const energyValues = frame.energy;
+      const directionValues = frame.alpha1;
+
+      const peakIndices = [];
+      for (let i = 1; i < freqs.length - 1; i++) {
+        if (freqs[i] < PEAK_DETECT_MIN_FREQ_HZ || freqs[i] > PEAK_DETECT_MAX_FREQ_HZ) continue;
+        const isLocalPeak = energyValues[i] >= energyValues[i - 1] && energyValues[i] >= energyValues[i + 1];
+        if (isLocalPeak && energyValues[i] >= peakThreshold) {
+          peakIndices.push(i);
+        }
+      }
+
+      // Rank by energy first (as before) — only the selected top peaks get a
+      // band computed for them, so a lower-energy peak that didn't make the
+      // cut doesn't split a neighboring swell's band in two.
+      const selected = peakIndices
+        .sort((a, b) => energyValues[b] - energyValues[a])
+        .slice(0, MAX_SWELL_CLUSTERS);
+
+      const bandM0ByIndex = computeSwellBandM0(frame, selected);
+
+      return selected.map(i => {
+        const m0 = bandM0ByIndex.get(i) || 0;
+        const heightM = hsFromM0(m0);
+        const heightFt = heightM * M_TO_FT;
+        const period = periods[i];
+        const faceFt = estimateFaceHeightM(heightM, period) * M_TO_FT;
+        return {
+          period,
+          energy: energyValues[i],
+          direction: directionValues[i],
+          heightM,
+          heightFt,
+          faceFt
+        };
+      });
+    }
+
+    // Rank color for a swell at table/plot position i (0 = highest energy) —
+    // the one place SWELL_RANK_COLORS' wraparound indexing lives, rather than
+    // repeating `SWELL_RANK_COLORS[i % SWELL_RANK_COLORS.length]` at every
+    // call site that colors a swell by rank.
+    function swellRankColor(i) {
+      return SWELL_RANK_COLORS[i % SWELL_RANK_COLORS.length];
+    }
+
+    // Hover text for a swell cluster's polar-plot bubble.
+    function formatSwellHoverText(c, i) {
+      return `Swell ${i + 1}: ${c.energy.toFixed(2)} m²/Hz @ ${c.period.toFixed(1)}s — ${c.heightFt.toFixed(1)} ft`;
+    }
+
+    function getGlobalYMax(minYLimit) {
+      let maxEnergy = 0;
+      for (const frame of timeSeriesData) {
+        const frameMax = Math.max(...frame.energy);
+        if (frameMax > maxEnergy) maxEnergy = frameMax;
+      }
+      return Math.max(minYLimit, maxEnergy * 1.05);
+    }
+
+    // Wind grade (Good/Fair/Poor, colored) + Effective Wind + compass direction,
+    // plus the overall significant wave height, rendered into the swell table's
+    // own header bar (left-justified, right after "Swell Table" — see
+    // .swell-table-wind-info) instead of the standalone legend bar this used to
+    // be part of. Grade/wind/direction are grouped together with no dot between
+    // them (e.g. "Good 8.4 kts NE"), then a dot separates the wave height
+    // ("Good 8.4 kts NE · Hs 4.2 ft"); either group is skipped entirely when its
+    // data isn't available for the current frame, so the header just reads
+    // "Swell Table" with no trailing dash or placeholder.
+    function updateSwellTableHeader(effectiveWind, windGrade, windDirCompass, sigWaveHeightFt) {
+      const el = document.getElementById('swellTableWindInfo');
+      if (!el) return;
+
+      const windBits = [];
+      if (windGrade) windBits.push(`<span style="color: ${windGrade.color};">${windGrade.label}</span>`);
+      if (effectiveWind !== null && effectiveWind !== undefined) {
+        windBits.push(`${effectiveWind.toFixed(1)} kts${windDirCompass ? ' ' + windDirCompass : ''}`);
+      }
+
+      const parts = [];
+      if (windBits.length) parts.push(windBits.join(' '));
+      if (sigWaveHeightFt !== null && sigWaveHeightFt !== undefined && isFinite(sigWaveHeightFt)) {
+        parts.push(`Hs ${sigWaveHeightFt.toFixed(1)} ft`);
+      }
+
+      el.innerHTML = parts.join(' &middot; ');
+    }
+
+    // Renders the collapsible swell table (height / period / direction / face
+    // height / energy, ranked by energy — clusters already arrive in that
+    // order from analyzeFrame). Always renders exactly MAX_SWELL_CLUSTERS
+    // rows: frames with fewer detected swells get muted placeholder rows
+    // (dashes, hollow rank bubble) padding out the remainder, so the table's
+    // height — and the plots sitting below it — stay constant across frames
+    // instead of growing/shrinking with however many swells this frame had.
+    // The open/closed state persists across calls via the module-level
+    // swellTableOpen flag, applied at the end via applySwellTableOpenState()
+    // so playback/frame-stepping doesn't reset it.
+    function renderSwellTable(clusters) {
+      const tbody = document.getElementById('swellTableBody');
+      if (!tbody) return;
+
+      const rows = [];
+      for (let i = 0; i < MAX_SWELL_CLUSTERS; i++) {
+        const c = clusters[i];
+        if (c) {
+          rows.push(`
+            <tr>
+              <td>
+                <span class="swell-rank-cell">
+                  <span>${i + 1}</span>
+                  <span class="swell-rank-bubble" style="background-color: ${swellRankColor(i)};"></span>
+                </span>
+              </td>
+              <td>${c.heightFt.toFixed(1)}</td>
+              <td>${c.period.toFixed(1)}</td>
+              <td>${Math.round(((c.direction % 360) + 360) % 360)}°</td>
+              <td>${c.faceFt.toFixed(1)}</td>
+              <td>${c.energy.toFixed(2)}</td>
+            </tr>
+          `);
+        } else {
+          rows.push(`
+            <tr class="swell-table-row-empty">
+              <td>
+                <span class="swell-rank-cell">
+                  <span>${i + 1}</span>
+                  <span class="swell-rank-bubble swell-rank-bubble-empty"></span>
+                </span>
+              </td>
+              <td>—</td>
+              <td>—</td>
+              <td>—</td>
+              <td>—</td>
+              <td>—</td>
+            </tr>
+          `);
+        }
+      }
+      tbody.innerHTML = rows.join('');
+
+      applySwellTableOpenState();
+    }
+
+    // Applies swellTableOpen to the DOM — separated from the toggle handler so
+    // renderSwellTable() can re-apply it after rebuilding the table body
+    // (innerHTML replacement doesn't touch the container's own class, but this
+    // keeps both call sites — toggle and re-render — going through one path).
+    function applySwellTableOpenState() {
+      const container = document.getElementById('swellTableContainer');
+      const toggleBtn = document.getElementById('swellTableToggleBtn');
+      if (!container || !toggleBtn) return;
+      container.classList.toggle('collapsed', !swellTableOpen);
+      toggleBtn.classList.toggle('collapsed', !swellTableOpen);
+    }
+
+    function toggleSwellTable() {
+      swellTableOpen = !swellTableOpen;
+      applySwellTableOpenState();
+    }
+
+    function renderCurrentFrame() {
+      if (!timeSeriesData.length) return;
+
+      const settings = getUserSettings();
+      const frame = timeSeriesData[currentFrameIdx];
+      const currentTimeStr = frame.timestamp;
+      document.getElementById('timestampDisplay').innerText = currentTimeStr;
+
+      const periods = frame.frequencies.map(f => 1 / f);
+      const clusters = analyzeFrame(frame, settings.peakThreshold);
+      const globalYMax = getGlobalYMax(settings.minYLimit);
+      const { periodLimit, surfEnergy, surfPeriod, critAngle, beachAngle, windGradeCutoffs } = settings;
+
+      // Beach Angle is the compass direction a surfer standing on the beach faces
+      // while looking out at the swell — i.e. the seaward/offshore direction. Since
+      // swell & wind "direction" values in this chart use the standard oceanographic
+      // "coming FROM" convention, that same bearing marks the ocean-facing half of the
+      // compass; the opposite half is the land/beach side. Coloring those two halves
+      // gives an at-a-glance onshore/offshore read: a wind arrow landing on the water
+      // half means the wind is coming from over the ocean (onshore); on the sand half
+      // means it's coming off the land (offshore). landFacingAngle doubles as the
+      // "dead offshore" reference bearing for the wind quality grading below.
+      const oceanFacingAngle = ((beachAngle % 360) + 360) % 360;
+      const landFacingAngle = (oceanFacingAngle + 180) % 360;
+
+      const effectiveWind = frame.wind ? calculateEffectiveWind(frame.wind) : null;
+      const windGradeInfo = frame.wind
+        ? getWindGradeInfo(effectiveWind, frame.wind.fromDir, landFacingAngle, windGradeCutoffs)
+        : null;
+      const windGradeColor = windGradeInfo ? windGradeInfo.color : null;
+      const windDirCompass = frame.wind ? degreesToCompass(frame.wind.fromDir) : null;
+      const sigWaveHeightFt = computeSignificantWaveHeightFt(frame);
+
+      updateSwellTableHeader(effectiveWind, windGradeInfo, windDirCompass, sigWaveHeightFt);
+      renderSwellTable(clusters);
+
+      const circleAngles = Array.from({ length: 361 }, (_, i) => i);
+      const circlePeriods = Array(361).fill(surfPeriod);
+
+      const polarData = [
+        // 0a. Water half (ocean-facing side) background
+        {
+          type: 'barpolar',
+          r: [periodLimit],
+          theta: [oceanFacingAngle],
+          width: [180],
+          marker: { color: WATER_COLOR, line: { width: 0 } },
+          hoverinfo: 'skip',
+          showlegend: false
+        },
+        // 0b. Beach half (land-facing side) background
+        {
+          type: 'barpolar',
+          r: [periodLimit],
+          theta: [landFacingAngle],
+          width: [180],
+          marker: { color: SAND_COLOR, line: { width: 0 } },
+          hoverinfo: 'skip',
+          showlegend: false
+        },
+        // 1. Swell Markers (Colored by Rank, text labels removed)
+        {
+          type: 'scatterpolar',
+          mode: 'markers',
+          r: clusters.map(c => c.period),
+          theta: clusters.map(c => c.direction),
+          hoverinfo: 'text',
+          hovertext: clusters.map((c, i) => formatSwellHoverText(c, i)),
+          marker: {
+            size: clusters.map(c => Math.max(c.energy * 25, 12)),
+            color: clusters.map((_, i) => swellRankColor(i)),
+            opacity: 0.85
+          }
+        },
+        // 2. Swell Center Accent Dots (Matching Rank Colors)
+        {
+          type: 'scatterpolar',
+          mode: 'markers',
+          r: clusters.map(c => c.period),
+          theta: clusters.map(c => c.direction),
+          hoverinfo: 'none',
+          marker: {
+            size: 5,
+            color: clusters.map((_, i) => swellRankColor(i))
+          }
+        },
+        // 3. Critical Angle Line
+        {
+          type: 'scatterpolar',
+          mode: 'lines',
+          r: [0, periodLimit],
+          theta: [critAngle, critAngle],
+          name: 'Crit Angle',
+          hoverinfo: 'name',
+          line: CRIT_ANGLE_LINE_STYLE
+        },
+        // 4. Surf Period Guide Circle
+        {
+          type: 'scatterpolar',
+          mode: 'lines',
+          r: circlePeriods,
+          theta: circleAngles,
+          name: 'Crit Period Circle',
+          hoverinfo: 'none',
+          line: SURF_GUIDE_LINE_STYLE
+        }
+      ];
+
+      // Dynamic Wind Arrow with Multi-line Label
+      if (frame.wind) {
+        const w = frame.wind;
+        const arrowLength = w.speedKts;
+        // windGradeColor was already computed above (shared with the swell table
+        // header's grade text) from Effective Wind + this wind's direction
+        // relative to the beach.
+        const windColor = windGradeColor;
+        const labelText = `${Math.round(w.speedKts)}g${Math.round(w.gustKts)}<br>kts`;
+
+        const HEAD_LEN = 1.5;
+        // Keep the label inside the visible polar area even when wind speed (kts)
+        // exceeds the period-limit radial range — otherwise Plotly drops the
+        // text point entirely instead of clipping it.
+        const rawLabelRadius = Math.max(arrowLength, HEAD_LEN) + 0.8;
+        const labelRadius = Math.min(rawLabelRadius, periodLimit * 0.92);
+
+        let dynamicPos = 'top center';
+        const dir = w.fromDir % 360;
+        if (dir >= 135 && dir <= 225) {
+          dynamicPos = 'bottom center';
+        } else if (dir > 45 && dir < 135) {
+          dynamicPos = 'middle right';
+        } else if (dir > 225 && dir < 315) {
+          dynamicPos = 'middle left';
+        }
+
+        if (arrowLength >= HEAD_LEN) {
+          polarData.push({
+            type: 'scatterpolar',
+            mode: 'lines',
+            r: [HEAD_LEN, arrowLength],
+            theta: [w.fromDir, w.fromDir],
+            name: 'Wind Stem',
+            hoverinfo: 'none',
+            line: { color: windColor, width: 3.5 }
+          });
+        }
+
+        polarData.push({
+          type: 'scatterpolar',
+          mode: 'markers',
+          r: [0],
+          theta: [w.fromDir],
+          name: 'Wind Arrowhead',
+          hoverinfo: 'none',
+          marker: {
+            size: 22,
+            symbol: 'arrow',
+            angle: (w.fromDir + 180) % 360,
+            color: windColor
+          }
+        });
+
+        polarData.push({
+          type: 'scatterpolar',
+          mode: 'text',
+          r: [labelRadius],
+          theta: [w.fromDir],
+          text: [labelText],
+          textposition: dynamicPos,
+          textfont: { color: WIND_LABEL_COLOR, size: 11, weight: 'bold' },
+          name: 'Wind Label',
+          hoverinfo: 'text'
+        });
+      }
+
+      const polarLayout = {
+        title: {
+          text: `Peak Swells & Wind (Polar) — <span style="font-size:11px;color:#555">${currentTimeStr}</span>`,
+          font: { size: 13 }
+        },
+        bargap: 0,
+        polar: {
+          angularaxis: {
+            direction: "clockwise",
+            rotation: 90,
+            tickmode: 'array',
+            tickvals: [0, 45, 90, 135, 180, 225, 270, 315],
+            ticktext: ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+          },
+          radialaxis: {
+            range: [0, periodLimit],
+            angle: -225,
+            tickangle: -225,
+            showgrid: false,
+            ticks: 'outside',
+            nticks: 6
+          }
+        },
+        showlegend: false,
+        margin: { t: 40, b: 20, l: 30, r: 30 },
+        autosize: true
+      };
+
+      Plotly.newPlot('polarPlot', polarData, polarLayout, plotlyConfig);
+
+      const spectralData = [
+        {
+          x: periods,
+          y: frame.energy,
+          type: 'scatter',
+          mode: 'lines',
+          name: 'Energy Density',
+          line: { color: 'blue' }
+        }
+      ];
+
+      // Swell Vertical Lines
+      const swellRankLines = clusters.map((c, i) => ({
+        type: 'line',
+        x0: c.period,
+        x1: c.period,
+        y0: 0,
+        y1: globalYMax,
+        line: {
+          color: swellRankColor(i),
+          width: 2,
+          dash: 'dash'
+        }
+      }));
+
+      // Swell Line Number Annotations
+      const swellAnnotations = clusters.map((c, i) => ({
+        x: c.period,
+        y: globalYMax,
+        xref: 'x',
+        yref: 'y',
+        text: `${i + 1}`,
+        showarrow: false,
+        yanchor: 'bottom',
+        font: {
+          color: swellRankColor(i),
+          size: 12,
+          weight: 'bold'
+        }
+      }));
+
+      const spectralLayout = {
+        title: { text: `Energy Density vs Period — <span style="font-size:11px;color:#555">${currentTimeStr}</span>`, font: { size: 13 } },
+        xaxis: { title: 'Period (s)', range: [0, periodLimit] },
+        yaxis: { title: 'Energy (m²/Hz)', range: [0, globalYMax] },
+        margin: { t: 40, b: 40, l: 40, r: 20 },
+        shapes: [
+          { type: 'line', x0: surfPeriod, x1: surfPeriod, y0: 0, y1: globalYMax, line: SURF_GUIDE_LINE_STYLE },
+          { type: 'line', x0: 0, x1: periodLimit, y0: surfEnergy, y1: surfEnergy, line: SURF_GUIDE_LINE_STYLE },
+          ...swellRankLines
+        ],
+        annotations: [
+          {
+            x: periodLimit,
+            y: surfEnergy,
+            xref: 'x',
+            yref: 'y',
+            text: 'Surf-Worthy Swell',
+            showarrow: false,
+            xanchor: 'right',
+            yanchor: 'bottom',
+            font: { color: 'green', size: 10, weight: 'bold' }
+          },
+          ...swellAnnotations
+        ],
+        autosize: true
+      };
+
+      Plotly.newPlot('spectralPlot', spectralData, spectralLayout, plotlyConfig);
+
+      renderHeatmap({ globalYMax, periodLimit, surfPeriod, currentTimeStr });
+    }
+
+    function renderHeatmap({ globalYMax, periodLimit, surfPeriod, currentTimeStr }) {
+      const yValues = timeSeriesData[0].frequencies.map(f => 1 / f);
+      // Use the full, guaranteed-unique timestamp as the actual plotted x-position/key
+      // (timeSeriesData is already in strict chronological order). Two frames can share
+      // the same clock hour — NDBC stations often report more than once within an hour
+      // near the most recent end of the feed — and if the bare hour string were used as
+      // the x-value itself, Plotly's categorical axis would collapse those into a single
+      // column, silently dropping data and shifting everything after it (blank patches,
+      // wrong scale, and a misaligned current-frame marker). Keeping the real timestamp
+      // as the key and only swapping in the hour text for display avoids all of that.
+      const xValues = timeSeriesData.map(frame => frame.timestamp);
+      const zValues = yValues.map((_, j) => timeSeriesData.map(frame => frame.energy[j]));
+
+      // Thin the displayed ticks (not the underlying columns — those stay one per
+      // frame) so labels don't get bunched together once there's more than a day
+      // of hourly data on screen. tickStep stays 1 (every hour labeled) for up to
+      // MAX_HEATMAP_TICKS columns, then grows just enough to keep the label count
+      // near that cap regardless of how many hours are plotted.
+      const tickStep = Math.max(1, Math.ceil(xValues.length / MAX_HEATMAP_TICKS));
+      const tickVals = xValues.filter((_, i) => i % tickStep === 0);
+      const tickText = tickVals.map(getETHourLabel);
+
+      const heatmapData = [{
+        z: zValues,
+        x: xValues,
+        y: yValues,
+        type: 'heatmap',
+        colorscale: afmhotYellowCap,
+        zmin: 0,
+        zmax: globalYMax || DEFAULTS.minYLimit
+      }];
+
+      if (document.getElementById('showTide').checked) {
+        const tideTrace = buildTideOverlayTrace(xValues, periodLimit);
+        if (tideTrace) heatmapData.push(tideTrace);
+      }
+
+      const tideTitleNote = (document.getElementById('showTide').checked && resolvedTideStation)
+        ? ` <span style="font-size:11px;color:${TIDE_LINE_COLOR}">| Tide: ${resolvedTideStation.name} (${resolvedTideStation.id})</span>`
+        : '';
+
+      const heatmapLayout = {
+        title: { text: `Spectral Density Heatmap Over Time — <span style="font-size:11px;color:#555">Active Frame: ${currentTimeStr}</span>${tideTitleNote}`, font: { size: 13 } },
+        xaxis: {
+          title: 'Hour (EDT/EST)',
+          type: 'category',
+          categoryorder: 'trace',
+          tickvals: tickVals,
+          ticktext: tickText
+        },
+        yaxis: { title: 'Period (s)', range: [HEATMAP_MIN_PERIOD_S, periodLimit] },
+        margin: { t: 40, b: 40, l: 40, r: 20 },
+        autosize: true,
+        shapes: [
+          {
+            type: 'line', xref: 'x', yref: 'paper',
+            x0: xValues[currentFrameIdx], x1: xValues[currentFrameIdx], y0: 0, y1: 1,
+            line: { color: 'white', width: 3 }
+          },
+          {
+            type: 'line', xref: 'paper', yref: 'y',
+            x0: 0, x1: 1, y0: surfPeriod, y1: surfPeriod,
+            line: SURF_GUIDE_LINE_STYLE
+          }
+        ]
+      };
+
+      Plotly.newPlot('heatmapPlot', heatmapData, heatmapLayout, plotlyConfig);
+    }
+
+    /* =====================================================================
+       PLAYBACK CONTROLS & SPEED
+       ===================================================================== */
+    function getPlaybackInterval() {
+      const speedSelect = document.getElementById('speedSelect');
+      return speedSelect ? parseInt(speedSelect.value) : PLAYBACK_INTERVAL_MS;
+    }
+
+    function togglePlay() {
+      isPlaying ? pause() : play();
+    }
 
     function play() {
-      state.isPlaying = true;
-      dom.playBtn.innerHTML = PAUSE_BTN_HTML;
-      if (state.playTimer) clearInterval(state.playTimer);
+      isPlaying = true;
+      document.getElementById('playBtn').innerText = "⏸ Pause";
+      if (playInterval) clearInterval(playInterval);
 
-      state.playTimer = setInterval(() => {
-        const nextIdx = state.frameIdx >= state.frames.length - 1 ? 0 : state.frameIdx + 1;
-        goToFrame(nextIdx);
+      playInterval = setInterval(() => {
+        currentFrameIdx = (currentFrameIdx >= timeSeriesData.length - 1) ? 0 : currentFrameIdx + 1;
+        document.getElementById('timeSlider').value = currentFrameIdx;
+        renderCurrentFrame();
       }, getPlaybackInterval());
     }
 
     function pause() {
-      state.isPlaying = false;
-      dom.playBtn.innerHTML = PLAY_BTN_HTML;
-      if (state.playTimer) clearInterval(state.playTimer);
+      isPlaying = false;
+      document.getElementById('playBtn').innerText = "▶ Play";
+      if (playInterval) clearInterval(playInterval);
     }
 
-    function onSpeedChange() { if (state.isPlaying) play(); }
+    function onSpeedChange() {
+      if (isPlaying) play();
+    }
 
     function stepFrame(dir) {
       pause();
-      goToFrame(state.frameIdx + dir);
+      currentFrameIdx = Math.max(0, Math.min(timeSeriesData.length - 1, currentFrameIdx + dir));
+      document.getElementById('timeSlider').value = currentFrameIdx;
+      renderCurrentFrame();
     }
 
     function firstFrame() {
       pause();
-      goToFrame(0);
+      currentFrameIdx = 0;
+      document.getElementById('timeSlider').value = currentFrameIdx;
+      renderCurrentFrame();
     }
 
     function lastFrame() {
       pause();
-      goToFrame(state.frames.length - 1);
+      currentFrameIdx = timeSeriesData.length - 1;
+      document.getElementById('timeSlider').value = currentFrameIdx;
+      renderCurrentFrame();
     }
 
     function onSliderMove(val) {
       pause();
-      goToFrame(parseInt(val));
+      currentFrameIdx = parseInt(val);
+      renderCurrentFrame();
     }
 
-    /* =========================================================================
+    /* =====================================================================
+       KEYBOARD SHORTCUTS
+       ===================================================================== */
+    document.addEventListener('keydown', (event) => {
+      // Avoid triggering hotkeys when typing in input/text fields
+      const activeElement = document.activeElement;
+      if (activeElement && (activeElement.tagName === 'INPUT' || activeElement.tagName === 'SELECT')) {
+        return;
+      }
+
+      switch (event.code) {
+        case 'Space':
+          event.preventDefault();
+          togglePlay();
+          break;
+        case 'ArrowLeft':
+          event.preventDefault();
+          stepFrame(-1);
+          break;
+        case 'ArrowRight':
+          event.preventDefault();
+          stepFrame(1);
+          break;
+        case 'Home':
+          event.preventDefault();
+          firstFrame();
+          break;
+        case 'End':
+          event.preventDefault();
+          lastFrame();
+          break;
+      }
+    });
+
+    /* =====================================================================
        INIT
-    ========================================================================= */
-    map = initMap();
-
-    // Single source of truth for the on-page version tag: CONFIG.version (see the
-    // header comment's CHANGELOG for what changed in each version).
-    document.getElementById('versionTag').innerText = `v${CONFIG.version}`;
-
-    // Once the person types their own End Date & Time, stop silently overwriting it
-    // with "now" on every fetch — they're deliberately looking at a fixed window.
-    dom.startDate.addEventListener('input', () => { state.autoEndDate = false; });
-
-    // Violin checkbox redraws right away - no refetch needed.
-    dom.violinToggle.addEventListener('change', () => renderCurrentFrame());
-
+       ===================================================================== */
     window.onload = () => {
+      setDefaultStartDate();
       fetchAndProcessData();
     };
   </script>
