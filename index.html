@@ -26,6 +26,12 @@
   push" points, not on every edit.
 
   Changelog (brief — full history in claude/CHANGELOG.md, same project):
+    v2.1.0 (2026-09-27) — "Hours to Plot" is now clock time, not a record
+      count (one frame per clock hour), so faster-reporting buoys like
+      41025 (every 30 min) cover the full window; wind matched to each
+      frame by nearest time (±30 min) instead of exact timestamp; default
+      Hours to Plot 12 → 24; added Wave Station presets (41025 Diamond
+      Shoals, 41159 Onslow Bay Outer).
     v2.0.0 (2026-09-21) — Swell table reworked: reordered to Height/Period/
       Direction/Face/Energy with a new Direction column; unit labels wrap
       to a second line and columns are fixed-width so it never scrolls or
@@ -415,6 +421,11 @@
             <div class="control-group">
               <label>Wave Station ID:</label>
               <input type="text" id="stationId" value="41159">
+              <select id="stationPreset" class="beach-angle-preset" onchange="applyStationPreset(this.value)">
+                <option value="" selected>Presets…</option>
+                <option value="41025">41025 Diamond Shoals</option>
+                <option value="41159">41159 Onslow Bay Outer</option>
+              </select>
             </div>
 
             <div class="control-group">
@@ -429,7 +440,7 @@
 
             <div class="control-group">
               <label>Hours to Plot:</label>
-              <input type="number" id="hoursToPlot" value="12" min="1" max="24">
+              <input type="number" id="hoursToPlot" value="24" min="1" max="24">
             </div>
 
             <div class="control-group">
@@ -572,7 +583,7 @@
     // Bumped only at explicit "ready to push" points, not on every edit — see
     // the CHANGELOG project doc for what's shipped under each version and
     // what's still queued under Unreleased.
-    const APP_VERSION = "2.0.0";
+    const APP_VERSION = "2.1.0";
     document.getElementById('appVersionLabel').innerText = `v${APP_VERSION}`;
 
     const WORKER_URL = "https://noaa-wave-proxy.rwnster.workers.dev";
@@ -590,6 +601,11 @@
     // that, ticks are thinned to an even hour-step so labels stop bunching up
     // instead of growing denser with every extra hour plotted.
     const MAX_HEATMAP_TICKS = 24;
+
+    const HOUR_MS = 60 * 60 * 1000;
+    // A wave frame uses the nearest wind reading within this window; beyond it,
+    // the frame shows no wind rather than a stale one.
+    const WIND_MATCH_TOLERANCE_MS = 30 * 60 * 1000;
     // Heatmap y-axis (Period) floor. The buoy's own frequency bins bottom out
     // around a ~2s period, so the axis is floored there instead of at 0 — the
     // heatmap's real data then fills the whole visible axis with no gap at the
@@ -685,7 +701,7 @@
        STATE
        ===================================================================== */
     let timeSeriesData = [];
-    let windTimeSeriesMap = new Map();
+    let windObservations = [];
     let currentFrameIdx = 0;
     let isPlaying = false;
     // Swell table open/closed state — persists across renderCurrentFrame() calls
@@ -826,6 +842,15 @@
     // loaded, re-renders immediately (no need to re-fetch — Beach Angle only affects
     // the polar plot's background coloring). The select resets to its placeholder
     // right after so it never looks "stuck" on a preset once the number is hand-edited.
+    // Wave Station preset: fills the Station ID and reloads, same as picking
+    // the buoy on the map. Resets to "Presets…" so the same one can be re-picked.
+    function applyStationPreset(value) {
+      if (!value) return;
+      document.getElementById('stationId').value = value;
+      document.getElementById('stationPreset').value = '';
+      fetchAndProcessData();
+    }
+
     function applyBeachAnglePreset(value) {
       if (!value) return;
       document.getElementById('beachAngle').value = value;
@@ -1079,9 +1104,13 @@
       return parseNDBCWindFormat(text);
     }
 
+    // Returns wind observations as an array sorted by time ({ t: UTC ms, ...wind }).
+    // Matched to wave frames by nearest time (see findNearestWind), not by exact
+    // timestamp, because wave and wind stations don't necessarily report on the
+    // same minute (e.g. 41025 wave data lands at :20/:50).
     function parseNDBCWindFormat(text) {
       const lines = text.trim().split('\n');
-      const windMap = new Map();
+      const windObs = [];
 
       for (let line of lines) {
         line = line.trim();
@@ -1100,8 +1129,7 @@
         const wspd = parseFloat(parts[6]);
         const gst = parseFloat(parts[7]);
 
-        const utcDate = new Date(Date.UTC(year, month - 1, day, hour, minute));
-        const formattedTimestamp = formatToET(utcDate);
+        const utcMs = Date.UTC(year, month - 1, day, hour, minute);
 
         if (!isNaN(wdir) && !isNaN(wspd)) {
           const wspdKts = wspd * MPS_TO_KNOTS;
@@ -1109,7 +1137,8 @@
 
           const towardsDir = (wdir + 180) % 360;
 
-          windMap.set(formattedTimestamp, {
+          windObs.push({
+            t: utcMs,
             fromDir: wdir,
             towardsDir: towardsDir,
             speedKts: wspdKts,
@@ -1117,12 +1146,30 @@
           });
         }
       }
-      return windMap;
+      return windObs.sort((a, b) => a.t - b.t);
+    }
+
+    // Wind reading closest in time to utcMs, if one falls within
+    // WIND_MATCH_TOLERANCE_MS; otherwise null (no wind shown for that frame).
+    function findNearestWind(windObs, utcMs) {
+      if (!windObs || windObs.length === 0) return null;
+      let lo = 0, hi = windObs.length - 1;
+      while (lo < hi) {                       // first obs with t >= utcMs
+        const mid = (lo + hi) >> 1;
+        if (windObs[mid].t < utcMs) lo = mid + 1; else hi = mid;
+      }
+      let best = null;
+      for (const i of [lo - 1, lo]) {
+        const o = windObs[i];
+        if (o && (!best || Math.abs(o.t - utcMs) < Math.abs(best.t - utcMs))) best = o;
+      }
+      return best && Math.abs(best.t - utcMs) <= WIND_MATCH_TOLERANCE_MS ? best : null;
     }
 
     function parseNDBCFormat(text) {
       const lines = text.trim().split('\n');
       const timestamps = [];
+      const utcTimes = [];   // same rows as timestamps, as UTC epoch ms (for time math)
       let frequencies = [];
       const matrices = [];
 
@@ -1142,9 +1189,10 @@
 
         const utcDate = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2], parts[3], parts[4]));
         timestamps.push(formatToET(utcDate));
+        utcTimes.push(utcDate.getTime());
         matrices.push(matches.map(m => parseFloat(m[1])));
       }
-      return { timestamps, frequencies, matrices };
+      return { timestamps, utcTimes, frequencies, matrices };
     }
 
     async function fetchAndProcessData() {
@@ -1166,34 +1214,52 @@
         ]);
 
         try {
-          windTimeSeriesMap = await fetchWindData(settings.windStationId);
+          windObservations = await fetchWindData(settings.windStationId);
         } catch (wErr) {
-          windTimeSeriesMap = new Map();
+          windObservations = [];
           windErrorMsg = wErr.message;
           alert(`Wind Data Warning: ${wErr.message}`);
         }
 
         status.innerText = "Processing spectral matrices...";
 
+        // NDBC files are newest-first. Find the newest record at or before the
+        // chosen start date (or the newest record overall).
         let startIndex = 0;
         if (settings.startDate) {
           const targetTime = new Date(settings.startDate).getTime();
-          const foundIdx = spec.timestamps.findIndex(ts => new Date(ts).getTime() <= targetTime);
+          const foundIdx = spec.utcTimes.findIndex(t => t <= targetTime);
           startIndex = foundIdx === -1 ? 0 : foundIdx;
         }
 
-        const endIndex = Math.min(startIndex + settings.hoursToPlot, spec.timestamps.length);
-        timeSeriesData = [];
+        // "Hours to Plot" is a span of clock time, not a record count: stations
+        // report at different rates (41159 hourly on the hour, 41025 every 30 min
+        // at :20/:50), so counting records made faster stations cover less time.
+        // Keep one record per clock hour — the latest one in that hour, matching
+        // how the heatmap labels its columns — for hoursToPlot hours back from
+        // the start record's hour.
+        const anchorHourMs = Math.floor(spec.utcTimes[startIndex] / HOUR_MS) * HOUR_MS;
+        const oldestHourMs = anchorHourMs - (settings.hoursToPlot - 1) * HOUR_MS;
+        const pickedIdx = [];
+        let lastHourMs = null;
+        for (let i = startIndex; i < spec.utcTimes.length; i++) {
+          const hourMs = Math.floor(spec.utcTimes[i] / HOUR_MS) * HOUR_MS;
+          if (hourMs < oldestHourMs) break;
+          if (hourMs === lastHourMs) continue;   // already have this hour's latest
+          pickedIdx.push(i);
+          lastHourMs = hourMs;
+        }
 
-        for (let i = endIndex - 1; i >= startIndex; i--) {
-          const ts = spec.timestamps[i];
+        timeSeriesData = [];
+        for (let k = pickedIdx.length - 1; k >= 0; k--) {   // oldest → newest
+          const i = pickedIdx[k];
           timeSeriesData.push({
-            timestamp: ts,
+            timestamp: spec.timestamps[i],
             frequencies: spec.frequencies,
             energy: spec.matrices[i],
             alpha1: alpha1.matrices[i],
             alpha2: alpha2.matrices[i],
-            wind: windTimeSeriesMap.get(ts) || null
+            wind: findNearestWind(windObservations, spec.utcTimes[i])
           });
         }
 
