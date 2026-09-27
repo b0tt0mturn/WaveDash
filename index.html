@@ -26,6 +26,9 @@
   push" points, not on every edit.
 
   Changelog (brief — full history in claude/CHANGELOG.md, same project):
+    v2.1.1 (2026-09-27) — Tide station is now the one closest to the Wind
+      Station (usually shore-based, near the break) instead of the offshore
+      wave buoy; falls back to the buoy if the wind station can't be located.
     v2.1.0 (2026-09-27) — "Hours to Plot" is now clock time, not a record
       count (one frame per clock hour), so faster-reporting buoys like
       41025 (every 30 min) cover the full window; wind matched to each
@@ -583,7 +586,7 @@
     // Bumped only at explicit "ready to push" points, not on every edit — see
     // the CHANGELOG project doc for what's shipped under each version and
     // what's still queued under Unreleased.
-    const APP_VERSION = "2.1.0";
+    const APP_VERSION = "2.1.1";
     document.getElementById('appVersionLabel').innerText = `v${APP_VERSION}`;
 
     const WORKER_URL = "https://noaa-wave-proxy.rwnster.workers.dev";
@@ -711,12 +714,16 @@
     let mapMarkersGroup = null;
     let tideMarkerGroup = null; // separate layer group so renderBuoysOnMap's clearLayers() never wipes the tide marker
 
-    // Tide overlay state (heatmap only). currentBuoyLocation is set whenever the
-    // wave buoy resolves (see updateDynamicBuoyDatabase) so the Show Tide toggle
-    // can look up the nearest tide station even if flipped after the fact, without
+    // Tide overlay state (heatmap only). currentBuoyLocation/currentWindLocation
+    // are set whenever the stations resolve (see updateDynamicBuoyDatabase) so the
+    // Show Tide toggle can look up the nearest tide station even if flipped after the fact, without
     // needing a fresh Update click. tideStationListCache/nearestTideStationCache
     // avoid re-fetching NOAA's full (multi-thousand-station) list on every use.
     let currentBuoyLocation = null;
+    // Location of the Wind Station ID (usually a shore station near the break
+    // being surfed) — the tide station is picked closest to this, falling back
+    // to currentBuoyLocation if the wind station couldn't be located.
+    let currentWindLocation = null;
     let tideStationListCache = null;
     const nearestTideStationCache = new Map();
     let tideData = null; // [{ utcMs, height }, ...] sorted ascending, or null if unavailable
@@ -1002,7 +1009,7 @@
       }).addTo(tideMarkerGroup);
 
       marker.bindTooltip(`Tide: ${station.name}`, { permanent: false, direction: 'top', offset: [0, -8] });
-      marker.bindPopup(`<b>Tide Station ${station.id}</b><br>${station.name}<br>Distance from buoy: ${station.distanceMiles.toFixed(1)} miles`);
+      marker.bindPopup(`<b>Tide Station ${station.id}</b><br>${station.name}<br>Distance from ${station.distanceFrom || 'buoy'}: ${station.distanceMiles.toFixed(1)} miles`);
     }
 
     function setMapStation(id, type) {
@@ -1020,7 +1027,15 @@
     // Returns the resolved { lat, lon } of activeStationId (also stashed in
     // currentBuoyLocation, since the tide overlay needs it later — after this
     // call returns, e.g. when the user flips the Show Tide toggle post-fetch).
-    async function updateDynamicBuoyDatabase(activeStationId) {
+    // Also resolves windStationId's location into currentWindLocation (null if
+    // it isn't in the station list), for picking the tide station.
+    async function updateDynamicBuoyDatabase(activeStationId, windStationId) {
+      const windId = (windStationId || '').toUpperCase();
+      const setWindLocation = (stations) => {
+        const match = list => list.find(s => s.id.toUpperCase() === windId);
+        const w = windId && (match(stations) || match(fallbackBuoyDatabase));
+        currentWindLocation = w ? { id: w.id, lat: w.lat, lon: w.lon } : null;
+      };
       const targetUrl = "https://www.ndbc.noaa.gov/activestations.xml";
 
       try {
@@ -1052,6 +1067,7 @@
         if (!targetBuoy) throw new Error("Target buoy not found in active XML list.");
         renderBuoysOnMap(allStations, targetBuoy);
         currentBuoyLocation = { lat: targetBuoy.lat, lon: targetBuoy.lon };
+        setWindLocation(allStations);
         return currentBuoyLocation;
 
       } catch (err) {
@@ -1062,6 +1078,7 @@
 
         renderBuoysOnMap(fallbackBuoyDatabase, targetBuoy);
         currentBuoyLocation = { lat: targetBuoy.lat, lon: targetBuoy.lon };
+        setWindLocation(fallbackBuoyDatabase);
         return currentBuoyLocation;
       }
     }
@@ -1202,7 +1219,7 @@
 
       try {
         status.innerText = `Locating nearby wave buoys within ${NEARBY_BUOY_RADIUS_MILES}mi...`;
-        await updateDynamicBuoyDatabase(settings.stationId);
+        await updateDynamicBuoyDatabase(settings.stationId, settings.windStationId);
 
         status.innerText = "Fetching buoy and wind data...";
 
@@ -1331,7 +1348,7 @@
     // same haversine distance function as the buoy map. The full station list
     // (a few thousand entries, global) is fetched once and cached; the resolved
     // nearest station per location is cached too, since it never changes for a
-    // given wave buoy.
+    // given reference point (the wind station, or the wave buoy as fallback).
     async function findNearestTideStation(lat, lon) {
       const cacheKey = `${lat.toFixed(3)},${lon.toFixed(3)}`;
       if (nearestTideStationCache.has(cacheKey)) return nearestTideStationCache.get(cacheKey);
@@ -1363,11 +1380,17 @@
     // between them is reconstructed) for a window padded around what's currently
     // plotted, and populates the module-level tideData used by renderHeatmap().
     async function loadTideDataForCurrentWindow() {
-      if (!currentBuoyLocation) throw new Error("No wave buoy location resolved yet");
+      if (!currentBuoyLocation && !currentWindLocation) throw new Error("No station location resolved yet");
       if (!timeSeriesData.length) throw new Error("No wave data loaded yet");
 
-      const station = await findNearestTideStation(currentBuoyLocation.lat, currentBuoyLocation.lon);
-      if (!station) throw new Error("No nearby tide station found");
+      // Closest to the wind station (normally shore-based, near where we surf);
+      // fall back to the wave buoy if the wind station couldn't be located.
+      const ref = currentWindLocation
+        ? { lat: currentWindLocation.lat, lon: currentWindLocation.lon, label: `wind station ${currentWindLocation.id}` }
+        : { lat: currentBuoyLocation.lat, lon: currentBuoyLocation.lon, label: 'wave buoy' };
+      const found = await findNearestTideStation(ref.lat, ref.lon);
+      if (!found) throw new Error("No nearby tide station found");
+      const station = { ...found, distanceFrom: ref.label };
 
       const earliestUTC = parseETTimestampToUTC(timeSeriesData[0].timestamp);
       const latestUTC = parseETTimestampToUTC(timeSeriesData[timeSeriesData.length - 1].timestamp);
