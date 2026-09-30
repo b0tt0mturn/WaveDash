@@ -11,8 +11,9 @@
       significant wave height in its own header bar,
     - a polar plot of ranked swells (period + direction) and the wind arrow,
     - an energy-density-vs-period spectral plot for the current frame,
-    - and an hours-long heatmap of the spectrum over time, with an optional
-      tide overlay.
+    - an hours-long heatmap of the spectrum over time, with an optional
+      tide overlay,
+    - and a static tide chart (1h before now → 24h ahead) under the map.
 
   Per-swell significant wave height is derived by band-integrating the
   *measured* spectrum around each detected peak (Hs = 4*sqrt(m0)) — no
@@ -26,6 +27,13 @@
   push" points, not on every edit.
 
   Changelog (brief — full history in claude/CHANGELOG.md, same project):
+    v2.2.0 (2026-09-30) — Added a static tide chart, full width under the
+      map/settings: 1h before now → 24h ahead, dashed "Now" line, each
+      high/low labeled with time and height (ft, MLLW). Tide data now loads
+      on every Update; Show Tide only toggles the heatmap overlay. Map now
+      shows all NDBC stations (no 200-mi radius) on a canvas renderer, with
+      the station list cached per page load and DART / currents-or-water-
+      quality-only stations hidden.
     v2.1.1 (2026-09-27) — Tide station is now the one closest to the Wind
       Station (usually shore-based, near the break) instead of the offshore
       wave buoy; falls back to the buoy if the wind station can't be located.
@@ -373,6 +381,20 @@
       height: 270px;
       width: 100%;
     }
+    /* Tide chart is a supporting strip, so it's shorter than the main plots. */
+    .tide-plot-box {
+      height: 230px;
+      margin-top: 12px;
+    }
+    .tide-plot-empty {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      font-size: 12px;
+      color: #8a97a3;
+      font-style: italic;
+    }
     .tide-toggle-row {
       display: flex;
       justify-content: flex-end;
@@ -401,6 +423,7 @@
       }
       .full-width { grid-column: span 2; }
       .plot-box { height: 320px; }
+      .tide-plot-box { height: 260px; }
       .slider-container { flex-direction: row; align-items: center; }
     }
   </style>
@@ -497,6 +520,14 @@
         </div>
 
       </div>
+
+      <!-- Static tide chart, full width across the bottom of the map/settings
+           panel: 1h before now → 24h after, with a "Now" line and each
+           high/low labeled by time and height. Doesn't follow playback.
+           Always shown when tide data is available; the Show Tide checkbox
+           (above the heatmap) only controls the heatmap overlay line.
+           See renderTideChart(). -->
+      <div id="tidePlot" class="plot-box tide-plot-box"></div>
     </div>
 
     <div class="panel">
@@ -586,13 +617,11 @@
     // Bumped only at explicit "ready to push" points, not on every edit — see
     // the CHANGELOG project doc for what's shipped under each version and
     // what's still queued under Unreleased.
-    const APP_VERSION = "2.1.1";
+    const APP_VERSION = "2.2.0";
     document.getElementById('appVersionLabel').innerText = `v${APP_VERSION}`;
 
     const WORKER_URL = "https://noaa-wave-proxy.rwnster.workers.dev";
     const EARTH_RADIUS_MILES = 3958.8;
-    const MILES_TO_METERS = 1609.34;
-    const NEARBY_BUOY_RADIUS_MILES = 200;
     const PLAYBACK_INTERVAL_MS = 1000;
     const MAX_SWELL_CLUSTERS = 4;
     const PEAK_DETECT_MIN_FREQ_HZ = 0.05;
@@ -626,6 +655,13 @@
     // at both edges of the chart (a semidiurnal cycle is ~12.4h, so 24h is safe).
     const TIDE_QUERY_PADDING_MS = 24 * 60 * 60 * 1000;
     const TIDE_LINE_COLOR = 'rgb(91, 155, 213)'; // same ocean-blue hue as WATER_COLOR, full opacity for line visibility
+    const TIDE_FILL_COLOR = 'rgba(91, 155, 213, 0.18)';
+    // Tide chart window: a static look-ahead from the actual current time
+    // (not the plotted frames), so it doesn't move during playback.
+    // loadTideDataForCurrentWindow() makes sure the request covers it.
+    const TIDE_CHART_SPAN_MS = 24 * HOUR_MS;      // look-ahead from now
+    const TIDE_CHART_LOOKBACK_MS = 1 * HOUR_MS;   // shown before now, for context
+    const TIDE_CHART_SAMPLE_MS = 10 * 60 * 1000; // curve resolution
 
     const SWELL_RANK_COLORS = ['#e6194B', '#3cb44b', '#ffe119', '#4363d8'];
 
@@ -910,7 +946,12 @@
         '<div style="display:flex;align-items:center;justify-content:center;height:100%;padding:10px;text-align:center;color:#d9534f;font-size:12px;">Map library failed to load.</div>';
       document.getElementById('statusMsg').innerText = 'Map library failed to load.';
     } else {
-      map = L.map('map').setView([34.211, -76.944], 7);
+      // Canvas renderer instead of Leaflet's default one-SVG-element-per-marker:
+      // the map now shows every NDBC station (well over a thousand), and a single
+      // canvas keeps pan/zoom smooth on a phone. tolerance widens the tap target
+      // around each small dot so they're still easy to hit with a finger.
+      map = L.map('map', { preferCanvas: true, renderer: L.canvas({ tolerance: 6 }) })
+        .setView([34.211, -76.944], 7);
 
       L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}', {
         attribution: 'Tiles &copy; Esri',
@@ -935,27 +976,25 @@
       return EARTH_RADIUS_MILES * c;
     }
 
+    // Draws every station in buoyList (no radius filter — the whole list is
+    // downloaded either way, so filtering never saved bandwidth; it only
+    // stopped you scrolling to distant stations). The selected wave and wind
+    // stations are drawn last so they sit on top of neighboring dots.
+    // "Distance" in each popup is measured from the selected wave buoy.
     function renderBuoysOnMap(buoyList, targetBuoy) {
       if (!map || !mapMarkersGroup) return;
       mapMarkersGroup.clearLayers();
 
-      L.circle([targetBuoy.lat, targetBuoy.lon], {
-        radius: NEARBY_BUOY_RADIUS_MILES * MILES_TO_METERS,
-        color: '#007bff',
-        fillColor: '#007bff',
-        fillOpacity: 0.08,
-        weight: 1.5,
-        interactive: false
-      }).addTo(mapMarkersGroup);
-
-      const nearbyBuoys = buoyList.filter(b =>
-        getDistanceMiles(targetBuoy.lat, targetBuoy.lon, b.lat, b.lon) <= NEARBY_BUOY_RADIUS_MILES
-      );
-
       const currentWaveId = document.getElementById('stationId').value.trim().toUpperCase();
       const currentWindId = document.getElementById('windStationId').value.trim().toUpperCase();
 
-      nearbyBuoys.forEach(b => {
+      const isTarget = b => {
+        const id = b.id.toUpperCase();
+        return id === currentWaveId || id === currentWindId;
+      };
+      const ordered = buoyList.filter(b => !isTarget(b)).concat(buoyList.filter(isTarget));
+
+      ordered.forEach(b => {
         const dist = getDistanceMiles(targetBuoy.lat, targetBuoy.lon, b.lat, b.lon);
         const isWaveTarget = (b.id.toUpperCase() === currentWaveId);
         const isWindTarget = (b.id.toUpperCase() === currentWindId);
@@ -971,11 +1010,11 @@
         }
 
         const marker = L.circleMarker([b.lat, b.lon], {
-          radius: (isWaveTarget || isWindTarget) ? 8 : 6,
+          radius: (isWaveTarget || isWindTarget) ? 8 : 5,
           color: color,
           fillColor: fillColor,
           fillOpacity: 0.9,
-          weight: 2,
+          weight: (isWaveTarget || isWindTarget) ? 2 : 1.5,
           interactive: true
         }).addTo(mapMarkersGroup);
 
@@ -1036,36 +1075,18 @@
         const w = windId && (match(stations) || match(fallbackBuoyDatabase));
         currentWindLocation = w ? { id: w.id, lat: w.lat, lon: w.lon } : null;
       };
-      const targetUrl = "https://www.ndbc.noaa.gov/activestations.xml";
-
       try {
-        const response = await fetch(buildProxyUrl(targetUrl));
-        if (!response.ok) throw new Error("Could not fetch active NOAA stations database.");
-
-        const xmlText = await response.text();
-        const parser = new DOMParser();
-        const xmlDoc = parser.parseFromString(xmlText, "text/xml");
-        const stationNodes = xmlDoc.getElementsByTagName("station");
-
-        const allStations = [];
-        let targetBuoy = null;
-
-        for (let i = 0; i < stationNodes.length; i++) {
-          const node = stationNodes[i];
-          const id = node.getAttribute("id") ? node.getAttribute("id").toUpperCase() : "";
-          const lat = parseFloat(node.getAttribute("lat"));
-          const lon = parseFloat(node.getAttribute("lon"));
-          const name = node.getAttribute("name") || `Station ${id}`;
-
-          if (!isNaN(lat) && !isNaN(lon)) {
-            const stationObj = { id, name: `${id} - ${name}`, lat, lon };
-            allStations.push(stationObj);
-            if (id === activeStationId.toUpperCase()) targetBuoy = stationObj;
-          }
-        }
-
+        const allStations = await getActiveStationList();
+        const activeId = activeStationId.toUpperCase();
+        const targetBuoy = allStations.find(s => s.id === activeId);
         if (!targetBuoy) throw new Error("Target buoy not found in active XML list.");
-        renderBuoysOnMap(allStations, targetBuoy);
+
+        // Map shows only stations that could plausibly be picked as a wave or
+        // wind source (see isUsefulMapStation), plus the current selections
+        // no matter what their flags say.
+        const mapStations = allStations.filter(s =>
+          s.usefulForMap || s.id === activeId || s.id === windId);
+        renderBuoysOnMap(mapStations, targetBuoy);
         currentBuoyLocation = { lat: targetBuoy.lat, lon: targetBuoy.lon };
         setWindLocation(allStations);
         return currentBuoyLocation;
@@ -1081,6 +1102,52 @@
         setWindLocation(fallbackBuoyDatabase);
         return currentBuoyLocation;
       }
+    }
+
+    // NDBC's active station list, downloaded once per page load and reused on
+    // every later Update (it only changes when NOAA adds/retires a station).
+    // Only a successful download is saved, so a failed one gets retried on the
+    // next Update rather than sticking with the fallback list.
+    const ACTIVE_STATIONS_URL = "https://www.ndbc.noaa.gov/activestations.xml";
+    let activeStationsCache = null;
+
+    // A station is worth showing on the map unless it's one of the types that
+    // never has wave or wind data: DART tsunami buoys, and stations that only
+    // report currents and/or water quality (no met flag). activestations.xml
+    // doesn't say which stations have wave spectra, so weather-only stations
+    // still pass — this only drops the ones that are certain dead ends.
+    function isUsefulMapStation(node) {
+      const flag = attr => (node.getAttribute(attr) || '').toLowerCase() === 'y';
+      const type = (node.getAttribute('type') || '').toLowerCase();
+      if (type === 'dart' || flag('dart')) return false;
+      if (!flag('met') && (flag('currents') || flag('waterquality'))) return false;
+      return true;
+    }
+
+    async function getActiveStationList() {
+      if (activeStationsCache) return activeStationsCache;
+
+      const response = await fetch(buildProxyUrl(ACTIVE_STATIONS_URL));
+      if (!response.ok) throw new Error("Could not fetch active NOAA stations database.");
+
+      const xmlText = await response.text();
+      const xmlDoc = new DOMParser().parseFromString(xmlText, "text/xml");
+      const stationNodes = xmlDoc.getElementsByTagName("station");
+
+      const stations = [];
+      for (let i = 0; i < stationNodes.length; i++) {
+        const node = stationNodes[i];
+        const id = node.getAttribute("id") ? node.getAttribute("id").toUpperCase() : "";
+        const lat = parseFloat(node.getAttribute("lat"));
+        const lon = parseFloat(node.getAttribute("lon"));
+        const name = node.getAttribute("name") || `Station ${id}`;
+        if (!id || isNaN(lat) || isNaN(lon)) continue;
+        stations.push({ id, name: `${id} - ${name}`, lat, lon, usefulForMap: isUsefulMapStation(node) });
+      }
+      if (stations.length === 0) throw new Error("Active NOAA stations list was empty.");
+
+      activeStationsCache = stations;
+      return stations;
     }
 
     async function fetchNDBCFile(stationId, ext) {
@@ -1218,7 +1285,7 @@
       const settings = getUserSettings();
 
       try {
-        status.innerText = `Locating nearby wave buoys within ${NEARBY_BUOY_RADIUS_MILES}mi...`;
+        status.innerText = "Loading station map...";
         await updateDynamicBuoyDatabase(settings.stationId, settings.windStationId);
 
         status.innerText = "Fetching buoy and wind data...";
@@ -1292,23 +1359,21 @@
         // Tide overlay is optional and best-effort: its own try/catch keeps a
         // failure here (e.g. the proxy not allowing the NOAA tides domain
         // through) from blocking the wave/wind data that already succeeded.
+        // Always loaded now (not just when Show Tide is checked), since the
+        // 48-hour tide chart uses it too; the checkbox only gates the heatmap
+        // overlay line.
         let tideErrorMsg = null;
-        if (document.getElementById('showTide').checked) {
-          status.innerText = "Loading tide data...";
-          try {
-            await loadTideDataForCurrentWindow();
-          } catch (tErr) {
-            tideData = null;
-            resolvedTideStation = null;
-            renderTideStationMarker(null);
-            tideErrorMsg = tErr.message;
-            console.warn("Tide overlay unavailable:", tErr);
-          }
-        } else {
+        status.innerText = "Loading tide data...";
+        try {
+          await loadTideDataForCurrentWindow();
+        } catch (tErr) {
           tideData = null;
           resolvedTideStation = null;
           renderTideStationMarker(null);
+          tideErrorMsg = tErr.message;
+          console.warn("Tide data unavailable:", tErr);
         }
+        renderTideChart();
 
         renderCurrentFrame();
         const notes = [windErrorMsg && `Wind warning: ${windErrorMsg}`, tideErrorMsg && `Tide warning: ${tideErrorMsg}`]
@@ -1395,7 +1460,9 @@
       const earliestUTC = parseETTimestampToUTC(timeSeriesData[0].timestamp);
       const latestUTC = parseETTimestampToUTC(timeSeriesData[timeSeriesData.length - 1].timestamp);
       const beginDate = formatNOAADateUTC(earliestUTC - TIDE_QUERY_PADDING_MS);
-      const endDate = formatNOAADateUTC(latestUTC + TIDE_QUERY_PADDING_MS);
+      // Also cover the tide chart's now → +24h window, in case the plotted
+      // frames are from an earlier End Date.
+      const endDate = formatNOAADateUTC(Math.max(latestUTC + TIDE_QUERY_PADDING_MS, Date.now() + TIDE_CHART_SPAN_MS));
 
       const targetUrl = `${TIDE_PREDICTIONS_URL}?product=predictions&application=WaveDash` +
         `&begin_date=${beginDate}&end_date=${endDate}&datum=MLLW&station=${station.id}` +
@@ -1411,7 +1478,8 @@
       }
 
       tideData = json.predictions
-        .map(p => ({ utcMs: Date.parse(p.t.replace(' ', 'T') + 'Z'), height: parseFloat(p.v) }))
+        // type is NOAA's 'H' (high) / 'L' (low) flag — used to label the tide chart.
+        .map(p => ({ utcMs: Date.parse(p.t.replace(' ', 'T') + 'Z'), height: parseFloat(p.v), type: p.type }))
         .filter(p => isFinite(p.utcMs) && isFinite(p.height))
         .sort((a, b) => a.utcMs - b.utcMs);
 
@@ -1475,19 +1543,171 @@
       };
     }
 
+    /* =====================================================================
+       48-HOUR TIDE CHART
+       ===================================================================== */
+    // Plotly date axes are timezone-naive, so the x-values are ET wall-clock
+    // strings ("YYYY-MM-DD HH:MM") — that way the axis reads in local
+    // EDT/EST, matching the rest of the dashboard.
+    function toETPlotlyDate(utcMs) {
+      const p = getETDateParts(new Date(utcMs), {
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+      });
+      return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`;
+    }
+
+    // "HH:MM" in ET (24-hour, matching the heatmap's hour labels).
+    function formatETClock(utcMs) {
+      return toETPlotlyDate(utcMs).split(' ')[1];
+    }
+
+    // Renders a static tide curve from TIDE_CHART_LOOKBACK_MS (1h) before the
+    // current time to TIDE_CHART_SPAN_MS (24h) after, with a dashed "Now"
+    // line at load time, using the same raised-cosine hi/lo interpolation
+    // as the heatmap overlay. Unlike the overlay, this one is in real units
+    // (ft above MLLW), and each NOAA high/low prediction in the window is
+    // marked and labeled with its time and height. Rendered once per tide
+    // load (Update / Show Tide retry) — not per frame, so it doesn't animate
+    // during playback.
+    function renderTideChart() {
+      const el = document.getElementById('tidePlot');
+      if (!el) return;
+
+      if (!tideData || tideData.length < 2 || !timeSeriesData.length) {
+        Plotly.purge(el);
+        el.innerHTML = '<div class="tide-plot-empty">Tide data unavailable</div>';
+        return;
+      }
+      const placeholder = el.querySelector('.tide-plot-empty');
+      if (placeholder) placeholder.remove();
+
+      const nowUTC = Date.now();
+      const startUTC = nowUTC - TIDE_CHART_LOOKBACK_MS;
+      const endUTC = nowUTC + TIDE_CHART_SPAN_MS;
+      const nowX = toETPlotlyDate(nowUTC);
+
+      const curveX = [];
+      const curveY = [];
+      for (let t = startUTC; t <= endUTC; t += TIDE_CHART_SAMPLE_MS) {
+        const h = interpolateTideHeight(t, tideData);
+        if (h === null || !isFinite(h)) continue;
+        curveX.push(toETPlotlyDate(t));
+        curveY.push(h);
+      }
+      if (curveY.length < 2) {
+        Plotly.purge(el);
+        el.innerHTML = '<div class="tide-plot-empty">Tide data unavailable</div>';
+        return;
+      }
+
+      const events = tideData.filter(p => p.utcMs >= startUTC && p.utcMs <= endUTC);
+      const isHigh = p => (p.type ? p.type.toUpperCase().startsWith('H') : false);
+
+      const heights = curveY.concat(events.map(e => e.height));
+      const minH = Math.min(...heights);
+      const maxH = Math.max(...heights);
+      const span = (maxH - minH) || 1;
+      // Headroom above/below so the high/low labels never clip.
+      const yRange = [minH - span * 0.5, maxH + span * 0.5];
+
+      const EDGE_MS = 2 * HOUR_MS; // pull labels inward near the chart edges
+      const annotations = events.map(e => {
+        const high = isHigh(e);
+        let xanchor = 'center';
+        if (e.utcMs - startUTC < EDGE_MS) xanchor = 'left';
+        else if (endUTC - e.utcMs < EDGE_MS) xanchor = 'right';
+        return {
+          x: toETPlotlyDate(e.utcMs),
+          y: e.height,
+          xref: 'x', yref: 'y',
+          text: high
+            ? `<b>H</b> ${formatETClock(e.utcMs)}<br>${e.height.toFixed(1)} ft`
+            : `${e.height.toFixed(1)} ft<br><b>L</b> ${formatETClock(e.utcMs)}`,
+          showarrow: false,
+          xanchor,
+          yanchor: high ? 'bottom' : 'top',
+          yshift: high ? 6 : -6,
+          align: 'center',
+          font: { size: 10, color: '#1a252f' }
+        };
+      });
+
+      const data = [
+        {
+          type: 'scatter',
+          mode: 'lines',
+          x: curveX,
+          y: curveY,
+          fill: 'tozeroy',
+          fillcolor: TIDE_FILL_COLOR,
+          line: { color: TIDE_LINE_COLOR, width: 2.5, shape: 'spline' },
+          hovertemplate: '%{x|%a %H:%M}<br>%{y:.1f} ft<extra></extra>',
+          showlegend: false
+        },
+        {
+          type: 'scatter',
+          mode: 'markers',
+          x: events.map(e => toETPlotlyDate(e.utcMs)),
+          y: events.map(e => e.height),
+          marker: {
+            size: 8,
+            color: events.map(e => (isHigh(e) ? TIDE_LINE_COLOR : '#ffffff')),
+            line: { color: TIDE_LINE_COLOR, width: 2 }
+          },
+          hovertemplate: events.map(e =>
+            `${isHigh(e) ? 'High' : 'Low'} %{x|%a %H:%M}<br>%{y:.1f} ft<extra></extra>`),
+          showlegend: false
+        }
+      ];
+
+      const stationNote = resolvedTideStation
+        ? ` — <span style="font-size:11px;color:#555">${resolvedTideStation.name} (${resolvedTideStation.id})</span>`
+        : '';
+
+      const layout = {
+        title: { text: `Tide (ft, MLLW)${stationNote}`, font: { size: 13 } },
+        xaxis: {
+          type: 'date',
+          range: [toETPlotlyDate(startUTC), toETPlotlyDate(endUTC)],
+          dtick: 3 * HOUR_MS,
+          tickformat: '%H:%M\n%a %b %-d',
+          showgrid: true,
+          gridcolor: '#eef1f4'
+        },
+        yaxis: { range: yRange, zeroline: true, zerolinecolor: '#ccd3da', gridcolor: '#eef1f4', ticksuffix: ' ft' },
+        margin: { t: 40, b: 45, l: 45, r: 20 },
+        autosize: true,
+        hovermode: 'closest',
+        annotations: annotations.concat([{
+          x: nowX, y: 1, xref: 'x', yref: 'paper',
+          text: 'Now', showarrow: false,
+          xanchor: 'left', yanchor: 'top', xshift: 3,
+          font: { size: 10, color: '#6c757d' }
+        }]),
+        // Fixed "Now" reference line (drawn at load time — the chart is static).
+        shapes: [{
+          type: 'line', xref: 'x', yref: 'paper',
+          x0: nowX, x1: nowX, y0: 0, y1: 1,
+          line: { color: '#6c757d', width: 1.5, dash: 'dash' }
+        }]
+      };
+
+      Plotly.newPlot(el, data, layout, plotlyConfig);
+    }
+
     // Lets the toggle take effect immediately without requiring a full Update —
     // tide data is tied to the buoy location + plotted window, not the current
     // frame, so switching it on just needs one fetch (or the cache), not a re-fetch
     // of wave/wind data.
+    // Tide data is now loaded on every Update (the tide chart needs it), so
+    // this normally just re-renders; it only fetches if that earlier load failed.
     async function onShowTideToggle() {
       if (!timeSeriesData.length) return;
       const checked = document.getElementById('showTide').checked;
       const status = document.getElementById('statusMsg');
 
-      if (!checked) {
-        tideData = null;
-        resolvedTideStation = null;
-        renderTideStationMarker(null);
+      if (!checked || tideData) {
         renderCurrentFrame();
         return;
       }
@@ -1503,6 +1723,7 @@
         console.warn("Tide overlay unavailable:", err);
         status.innerText = `Tide warning: ${err.message}`;
       }
+      renderTideChart();
       renderCurrentFrame();
     }
 
