@@ -13,7 +13,7 @@
     - an energy-density-vs-period spectral plot for the current frame,
     - an hours-long heatmap of the spectrum over time, with an optional
       tide overlay,
-    - and a static tide chart (1h before now → 24h ahead) under the map.
+    - and a static 24h tide chart (starting 3h before now) under the map.
 
   Per-swell significant wave height is derived by band-integrating the
   *measured* spectrum around each detected peak (Hs = 4*sqrt(m0)) — no
@@ -659,8 +659,9 @@
     // Tide chart window: a static look-ahead from the actual current time
     // (not the plotted frames), so it doesn't move during playback.
     // loadTideDataForCurrentWindow() makes sure the request covers it.
-    const TIDE_CHART_SPAN_MS = 24 * HOUR_MS;      // look-ahead from now
-    const TIDE_CHART_LOOKBACK_MS = 1 * HOUR_MS;   // shown before now, for context
+    const TIDE_CHART_SPAN_MS = 24 * HOUR_MS;      // total window length (starts at now - lookback)
+    const TIDE_CHART_LOOKBACK_MS = 3 * HOUR_MS;   // shown before now, for context
+    const TIDE_NOW_LINE_COLOR = '#2e9e44';        // solid green "Now" marker on the tide chart
     const TIDE_CHART_SAMPLE_MS = 10 * 60 * 1000; // curve resolution
 
     const SWELL_RANK_COLORS = ['#e6194B', '#3cb44b', '#ffe119', '#4363d8'];
@@ -1562,9 +1563,10 @@
       return toETPlotlyDate(utcMs).split(' ')[1];
     }
 
-    // Renders a static tide curve from TIDE_CHART_LOOKBACK_MS (1h) before the
-    // current time to TIDE_CHART_SPAN_MS (24h) after, with a dashed "Now"
-    // line at load time, using the same raised-cosine hi/lo interpolation
+    // Renders a static 24h (TIDE_CHART_SPAN_MS) tide curve starting
+    // TIDE_CHART_LOOKBACK_MS (3h) before the current time, with a solid green
+    // "Now" line at load time and no axis tick labels (the high/low labels
+    // carry the information), using the same raised-cosine hi/lo interpolation
     // as the heatmap overlay. Unlike the overlay, this one is in real units
     // (ft above MLLW), and each NOAA high/low prediction in the window is
     // marked and labeled with its time and height. Rendered once per tide
@@ -1584,7 +1586,7 @@
 
       const nowUTC = Date.now();
       const startUTC = nowUTC - TIDE_CHART_LOOKBACK_MS;
-      const endUTC = nowUTC + TIDE_CHART_SPAN_MS;
+      const endUTC = startUTC + TIDE_CHART_SPAN_MS;
       const nowX = toETPlotlyDate(nowUTC);
 
       const curveX = [];
@@ -1670,26 +1672,26 @@
         xaxis: {
           type: 'date',
           range: [toETPlotlyDate(startUTC), toETPlotlyDate(endUTC)],
-          dtick: 3 * HOUR_MS,
-          tickformat: '%H:%M\n%a %b %-d',
-          showgrid: true,
-          gridcolor: '#eef1f4'
+          showticklabels: false,
+          ticks: '',
+          showgrid: false,
+          zeroline: false
         },
-        yaxis: { range: yRange, zeroline: true, zerolinecolor: '#ccd3da', gridcolor: '#eef1f4', ticksuffix: ' ft' },
-        margin: { t: 40, b: 45, l: 45, r: 20 },
+        yaxis: { range: yRange, showticklabels: false, ticks: '', showgrid: false, zeroline: false },
+        margin: { t: 40, b: 10, l: 10, r: 10 },
         autosize: true,
         hovermode: 'closest',
         annotations: annotations.concat([{
           x: nowX, y: 1, xref: 'x', yref: 'paper',
           text: 'Now', showarrow: false,
           xanchor: 'left', yanchor: 'top', xshift: 3,
-          font: { size: 10, color: '#6c757d' }
+          font: { size: 10, color: TIDE_NOW_LINE_COLOR }
         }]),
         // Fixed "Now" reference line (drawn at load time — the chart is static).
         shapes: [{
           type: 'line', xref: 'x', yref: 'paper',
           x0: nowX, x1: nowX, y0: 0, y1: 1,
-          line: { color: '#6c757d', width: 1.5, dash: 'dash' }
+          line: { color: TIDE_NOW_LINE_COLOR, width: 2, dash: 'solid' }
         }]
       };
 
