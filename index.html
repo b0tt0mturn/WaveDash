@@ -27,6 +27,13 @@
   push" points, not on every edit.
 
   Changelog (brief — full history in claude/CHANGELOG.md, same project):
+    v2.3.0 (2026-10-12) — Animation now runs on clock hours, so live wind
+      keeps playing when the wave buoy lags: missing hours hold the last good
+      wave record (blank heatmap column), and once it is >2h old a warning
+      banner shows, swell plots/table dim, and titles tag the wave age. Wind
+      arrow gets a dark halo/outline for contrast over same-colored swell
+      bubbles. Tide chart: 24h window starting 3h before now, no axis tick
+      labels or gridlines, solid green Now line. Added 🌊 favicon.
     v2.2.0 (2026-09-30) — Added a static tide chart, full width under the
       map/settings: 1h before now → 24h ahead, dashed "Now" line, each
       high/low labeled with time and height (ft, MLLW). Tide data now loads
@@ -638,7 +645,7 @@
     // Bumped only at explicit "ready to push" points, not on every edit — see
     // the CHANGELOG project doc for what's shipped under each version and
     // what's still queued under Unreleased.
-    const APP_VERSION = "2.2.0";
+    const APP_VERSION = "2.3.0";
     document.getElementById('appVersionLabel').innerText = `v${APP_VERSION}`;
 
     const WORKER_URL = "https://noaa-wave-proxy.rwnster.workers.dev";
