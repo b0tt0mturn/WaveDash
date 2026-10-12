@@ -207,6 +207,24 @@
     .btn:hover { background: #0056b3; }
     .status-msg { font-size: 10px; color: #6c757d; margin-top: 4px; font-style: italic; text-align: center; }
 
+    /* Shown under the time slider when the current frame's wave data is held
+       over from an older buoy record (see WAVE_STALE_THRESHOLD_MS). */
+    .wave-stale-warning {
+      margin-top: 6px;
+      padding: 5px 8px;
+      background: #fff3cd;
+      color: #7a5a00;
+      border: 1px solid #ffe08a;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: bold;
+      text-align: center;
+    }
+    .wave-stale-warning[hidden] { display: none; }
+    /* Swell table rows dim while their wave data is stale. */
+    .swell-table-stale tbody { opacity: 0.45; }
+    .stale-tag { color: #b8860b; font-weight: bold; }
+
     .player-controls {
       display: flex;
       gap: 4px;
@@ -553,6 +571,7 @@
         <span id="timestampDisplay" style="font-weight: bold; text-align: center;">Loading...</span>
         <input type="range" id="timeSlider" min="0" max="0" value="0" oninput="onSliderMove(this.value)">
       </div>
+      <div id="waveStaleWarning" class="wave-stale-warning" hidden></div>
 
       <div class="plots-grid" style="margin-top: 15px;">
         <!-- Swell Table: height/period/direction/face-height/energy per identified
@@ -640,6 +659,14 @@
     // A wave frame uses the nearest wind reading within this window; beyond it,
     // the frame shows no wind rather than a stale one.
     const WIND_MATCH_TOLERANCE_MS = 30 * 60 * 1000;
+    // The animation runs on clock hours, not wave records: when the wave buoy
+    // falls behind but the wind station is current, frames past the last wave
+    // record keep the live wind and hold the last good wave reading. A frame's
+    // wave data is flagged stale (warning banner + dimmed swell plots/table)
+    // once it is more than this much older than the frame. 41159 reports
+    // hourly and NDBC spectral files lag 40-60 min, so 2h avoids flicker from
+    // normal delays.
+    const WAVE_STALE_THRESHOLD_MS = 2 * HOUR_MS;
     // Heatmap y-axis (Period) floor. The buoy's own frequency bins bottom out
     // around a ~2s period, so the axis is floored there instead of at 0 — the
     // heatmap's real data then fills the whole visible axis with no gap at the
@@ -1310,43 +1337,62 @@
 
         status.innerText = "Processing spectral matrices...";
 
-        // NDBC files are newest-first. Find the newest record at or before the
-        // chosen start date (or the newest record overall).
-        let startIndex = 0;
+        // The timeline is clock hours, not wave records, so current wind keeps
+        // animating when the wave buoy falls behind. It ends at the newest wave
+        // OR wind reading (capped at the end of the chosen start hour) and runs
+        // "Hours to Plot" hours back. Each hour gets:
+        //   - the latest wave record in that hour (fresh), with the nearest wind;
+        //   - otherwise, the latest wind reading in that hour plus the last good
+        //     wave record before it (held — stale once older than
+        //     WAVE_STALE_THRESHOLD_MS; its heatmap column is left blank).
+        // Hours with neither new wave nor wind data are skipped.
+        // NDBC files are newest-first.
+        const latestWaveMs = spec.utcTimes[0];
+        const latestWindMs = windObservations.length ? windObservations[windObservations.length - 1].t : -Infinity;
+        let anchorMs = Math.max(latestWaveMs, latestWindMs);
         if (settings.startDate) {
-          const targetTime = new Date(settings.startDate).getTime();
-          const foundIdx = spec.utcTimes.findIndex(t => t <= targetTime);
-          startIndex = foundIdx === -1 ? 0 : foundIdx;
+          const targetHourEnd = new Date(settings.startDate).getTime() + HOUR_MS - 1;
+          if (isFinite(targetHourEnd)) anchorMs = Math.min(anchorMs, targetHourEnd);
         }
-
-        // "Hours to Plot" is a span of clock time, not a record count: stations
-        // report at different rates (41159 hourly on the hour, 41025 every 30 min
-        // at :20/:50), so counting records made faster stations cover less time.
-        // Keep one record per clock hour — the latest one in that hour, matching
-        // how the heatmap labels its columns — for hoursToPlot hours back from
-        // the start record's hour.
-        const anchorHourMs = Math.floor(spec.utcTimes[startIndex] / HOUR_MS) * HOUR_MS;
+        const anchorHourMs = Math.floor(anchorMs / HOUR_MS) * HOUR_MS;
         const oldestHourMs = anchorHourMs - (settings.hoursToPlot - 1) * HOUR_MS;
-        const pickedIdx = [];
-        let lastHourMs = null;
-        for (let i = startIndex; i < spec.utcTimes.length; i++) {
-          const hourMs = Math.floor(spec.utcTimes[i] / HOUR_MS) * HOUR_MS;
-          if (hourMs < oldestHourMs) break;
-          if (hourMs === lastHourMs) continue;   // already have this hour's latest
-          pickedIdx.push(i);
-          lastHourMs = hourMs;
-        }
+
+        const latestWindInHour = (hourMs) => {
+          let best = null;
+          for (const o of windObservations) {
+            if (o.t >= hourMs && o.t < hourMs + HOUR_MS && o.t <= anchorMs) best = o;
+          }
+          return best;
+        };
 
         timeSeriesData = [];
-        for (let k = pickedIdx.length - 1; k >= 0; k--) {   // oldest → newest
-          const i = pickedIdx[k];
+        for (let hourMs = oldestHourMs; hourMs <= anchorHourMs; hourMs += HOUR_MS) {
+          // Newest wave record before the end of this hour.
+          const i = spec.utcTimes.findIndex(t => t < hourMs + HOUR_MS);
+          if (i === -1) continue;   // no wave data at all yet
+          const waveMs = spec.utcTimes[i];
+          const waveFresh = waveMs >= hourMs;
+
+          let frameMs, wind;
+          if (waveFresh) {
+            frameMs = waveMs;
+            wind = findNearestWind(windObservations, waveMs);
+          } else {
+            wind = latestWindInHour(hourMs);
+            if (!wind) continue;    // nothing new this hour
+            frameMs = wind.t;
+          }
+
           timeSeriesData.push({
-            timestamp: spec.timestamps[i],
+            timestamp: formatToET(new Date(frameMs)),
             frequencies: spec.frequencies,
             energy: spec.matrices[i],
             alpha1: alpha1.matrices[i],
             alpha2: alpha2.matrices[i],
-            wind: findNearestWind(windObservations, spec.utcTimes[i])
+            wind,
+            waveFresh,
+            waveTimestamp: spec.timestamps[i],
+            waveAgeMs: frameMs - waveMs
           });
         }
 
@@ -1379,7 +1425,11 @@
         renderTideChart();
 
         renderCurrentFrame();
-        const notes = [windErrorMsg && `Wind warning: ${windErrorMsg}`, tideErrorMsg && `Tide warning: ${tideErrorMsg}`]
+        const newestFrame = timeSeriesData[timeSeriesData.length - 1];
+        const waveStaleMsg = newestFrame.waveAgeMs > WAVE_STALE_THRESHOLD_MS
+          ? `Wave data ${formatWaveAge(newestFrame.waveAgeMs)} old`
+          : null;
+        const notes = [waveStaleMsg, windErrorMsg && `Wind warning: ${windErrorMsg}`, tideErrorMsg && `Tide warning: ${tideErrorMsg}`]
           .filter(Boolean).join(' | ');
         status.innerText = notes ? `Wave data updated (${notes})` : "Updated successfully.";
 
@@ -1908,7 +1958,7 @@
     // ("Good 8.4 kts NE · Hs 4.2 ft"); either group is skipped entirely when its
     // data isn't available for the current frame, so the header just reads
     // "Swell Table" with no trailing dash or placeholder.
-    function updateSwellTableHeader(effectiveWind, windGrade, windDirCompass, sigWaveHeightFt) {
+    function updateSwellTableHeader(effectiveWind, windGrade, windDirCompass, sigWaveHeightFt, staleWaveAge) {
       const el = document.getElementById('swellTableWindInfo');
       if (!el) return;
 
@@ -1921,7 +1971,8 @@
       const parts = [];
       if (windBits.length) parts.push(windBits.join(' '));
       if (sigWaveHeightFt !== null && sigWaveHeightFt !== undefined && isFinite(sigWaveHeightFt)) {
-        parts.push(`Hs ${sigWaveHeightFt.toFixed(1)} ft`);
+        parts.push(`Hs ${sigWaveHeightFt.toFixed(1)} ft` +
+          (staleWaveAge ? ` <span class="stale-tag">(${staleWaveAge} old)</span>` : ''));
       }
 
       el.innerHTML = parts.join(' &middot; ');
@@ -2000,6 +2051,12 @@
       applySwellTableOpenState();
     }
 
+    // "6h" / "1.5h" style age for the stale-wave warnings.
+    function formatWaveAge(ageMs) {
+      const h = ageMs / HOUR_MS;
+      return h >= 10 ? `${Math.round(h)}h` : `${Math.round(h * 2) / 2}h`;
+    }
+
     function renderCurrentFrame() {
       if (!timeSeriesData.length) return;
 
@@ -2007,6 +2064,24 @@
       const frame = timeSeriesData[currentFrameIdx];
       const currentTimeStr = frame.timestamp;
       document.getElementById('timestampDisplay').innerText = currentTimeStr;
+
+      // Stale wave data: warning banner, dimmed swell plots/table, and an age
+      // tag in the plot titles. Wind is always this frame's own reading.
+      const waveStale = frame.waveAgeMs > WAVE_STALE_THRESHOLD_MS;
+      const waveAgeText = waveStale ? formatWaveAge(frame.waveAgeMs) : '';
+      const staleWarningEl = document.getElementById('waveStaleWarning');
+      if (staleWarningEl) {
+        staleWarningEl.hidden = !waveStale;
+        staleWarningEl.innerText = waveStale
+          ? `⚠ Wave data from ${settings.stationId} is ${waveAgeText} old (last ${frame.waveTimestamp.split(" ").slice(1).join(" ")}). Wind is current.`
+          : '';
+      }
+      const swellTableContainer = document.getElementById('swellTableContainer');
+      if (swellTableContainer) swellTableContainer.classList.toggle('swell-table-stale', waveStale);
+      const staleTitleTag = waveStale
+        ? ` <span style="font-size:11px;color:#b8860b"><b>· wave ${waveAgeText} old</b></span>`
+        : '';
+      const swellOpacity = waveStale ? 0.3 : 0.85;
 
       const periods = frame.frequencies.map(f => 1 / f);
       const clusters = analyzeFrame(frame, settings.peakThreshold);
@@ -2033,7 +2108,7 @@
       const windDirCompass = frame.wind ? degreesToCompass(frame.wind.fromDir) : null;
       const sigWaveHeightFt = computeSignificantWaveHeightFt(frame);
 
-      updateSwellTableHeader(effectiveWind, windGradeInfo, windDirCompass, sigWaveHeightFt);
+      updateSwellTableHeader(effectiveWind, windGradeInfo, windDirCompass, sigWaveHeightFt, waveStale ? waveAgeText : null);
       renderSwellTable(clusters);
 
       const circleAngles = Array.from({ length: 361 }, (_, i) => i);
@@ -2071,7 +2146,7 @@
           marker: {
             size: clusters.map(c => Math.max(c.energy * 25, 12)),
             color: clusters.map((_, i) => swellRankColor(i)),
-            opacity: 0.85
+            opacity: swellOpacity
           }
         },
         // 2. Swell Center Accent Dots (Matching Rank Colors)
@@ -2083,7 +2158,8 @@
           hoverinfo: 'none',
           marker: {
             size: 5,
-            color: clusters.map((_, i) => swellRankColor(i))
+            color: clusters.map((_, i) => swellRankColor(i)),
+            opacity: waveStale ? 0.4 : 1
           }
         },
         // 3. Critical Angle Line
@@ -2135,7 +2211,20 @@
           dynamicPos = 'middle left';
         }
 
+        // Dark halo under the stem and a dark outline on the head, so the
+        // grade-colored arrow stays readable over a same-colored swell bubble
+        // (e.g. a red "Poor" arrow over the red #1 swell) and on sand/water.
+        const WIND_HALO_COLOR = '#1a1a1a';
         if (arrowLength >= HEAD_LEN) {
+          polarData.push({
+            type: 'scatterpolar',
+            mode: 'lines',
+            r: [HEAD_LEN, arrowLength],
+            theta: [w.fromDir, w.fromDir],
+            name: 'Wind Stem Halo',
+            hoverinfo: 'none',
+            line: { color: WIND_HALO_COLOR, width: 7 }
+          });
           polarData.push({
             type: 'scatterpolar',
             mode: 'lines',
@@ -2155,10 +2244,11 @@
           name: 'Wind Arrowhead',
           hoverinfo: 'none',
           marker: {
-            size: 22,
+            size: 24,
             symbol: 'arrow',
             angle: (w.fromDir + 180) % 360,
-            color: windColor
+            color: windColor,
+            line: { color: WIND_HALO_COLOR, width: 1.5 }
           }
         });
 
@@ -2177,7 +2267,7 @@
 
       const polarLayout = {
         title: {
-          text: `Peak Swells & Wind (Polar) — <span style="font-size:11px;color:#555">${currentTimeStr}</span>`,
+          text: `Peak Swells & Wind (Polar) — <span style="font-size:11px;color:#555">${currentTimeStr}</span>${staleTitleTag}`,
           font: { size: 13 }
         },
         bargap: 0,
@@ -2212,7 +2302,7 @@
           type: 'scatter',
           mode: 'lines',
           name: 'Energy Density',
-          line: { color: 'blue' }
+          line: { color: waveStale ? '#9aa5b1' : 'blue', dash: waveStale ? 'dot' : 'solid' }
         }
       ];
 
@@ -2247,7 +2337,7 @@
       }));
 
       const spectralLayout = {
-        title: { text: `Energy Density vs Period — <span style="font-size:11px;color:#555">${currentTimeStr}</span>`, font: { size: 13 } },
+        title: { text: `Energy Density vs Period — <span style="font-size:11px;color:#555">${currentTimeStr}</span>${staleTitleTag}`, font: { size: 13 } },
         xaxis: { title: 'Period (s)', range: [0, periodLimit] },
         yaxis: { title: 'Energy (m²/Hz)', range: [0, globalYMax] },
         margin: { t: 40, b: 40, l: 40, r: 20 },
@@ -2289,7 +2379,9 @@
       // wrong scale, and a misaligned current-frame marker). Keeping the real timestamp
       // as the key and only swapping in the hour text for display avoids all of that.
       const xValues = timeSeriesData.map(frame => frame.timestamp);
-      const zValues = yValues.map((_, j) => timeSeriesData.map(frame => frame.energy[j]));
+      // Hours with no wave record of their own (held-over wave data) are left
+      // blank, so the gap in the buoy's reporting is visible.
+      const zValues = yValues.map((_, j) => timeSeriesData.map(frame => (frame.waveFresh === false ? null : frame.energy[j])));
 
       // Thin the displayed ticks (not the underlying columns — those stay one per
       // frame) so labels don't get bunched together once there's more than a day
