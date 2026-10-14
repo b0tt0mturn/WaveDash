@@ -27,6 +27,10 @@
   push" points, not on every edit.
 
   Changelog (brief — full history in claude/CHANGELOG.md, same project):
+    v2.4.0 (2026-10-14) — Usage tracking via Cloudflare Web Analytics
+      (free, cookieless, no consent banner). Loads only on the published
+      site, never from a local file or localhost. Open the site with
+      ?notrack=1 to stop counting that browser (?notrack=0 undoes it).
     v2.3.0 (2026-10-12) — Animation now runs on clock hours, so live wind
       keeps playing when the wave buoy lags: missing hours hold the last good
       wave record (blank heatmap column), and once it is >2h old a warning
@@ -78,6 +82,30 @@
   <title>Wave Dash</title>
   <!-- Tab icon: the same 🌊 emoji as the title line, as an inline SVG so no separate file is needed. -->
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌊</text></svg>">
+
+  <!-- Usage tracking: Cloudflare Web Analytics (free, cookieless, no consent banner).
+       Only loads on the published site, never from a local file or localhost, so dev
+       testing isn't counted. Visit the site once with ?notrack=1 to stop counting your
+       own browser (?notrack=0 undoes it). Same site token as Wind Dash (the token
+       covers the whole b0tt0mturn.github.io hostname; filter by path in Cloudflare). -->
+  <script>
+    (function () {
+      const CF_BEACON_TOKEN = '357e93677eb14f039d900b45fa582464';
+      try {
+        const q = new URLSearchParams(location.search).get('notrack');
+        if (q === '1') localStorage.setItem('wd.notrack', '1');
+        if (q === '0') localStorage.removeItem('wd.notrack');
+        if (localStorage.getItem('wd.notrack') === '1') return;
+      } catch (e) { /* storage blocked: just track normally */ }
+      if (!CF_BEACON_TOKEN || location.protocol === 'file:' ||
+          /^(localhost|127\.0\.0\.1)$/.test(location.hostname)) return;
+      const s = document.createElement('script');
+      s.defer = true;
+      s.src = 'https://static.cloudflareinsights.com/beacon.min.js';
+      s.setAttribute('data-cf-beacon', JSON.stringify({ token: CF_BEACON_TOKEN }));
+      document.head.appendChild(s);
+    })();
+  </script>
 
   <!-- Leaflet CSS & JS for Interactive Map -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
@@ -645,7 +673,7 @@
     // Bumped only at explicit "ready to push" points, not on every edit — see
     // the CHANGELOG project doc for what's shipped under each version and
     // what's still queued under Unreleased.
-    const APP_VERSION = "2.3.0";
+    const APP_VERSION = "2.4.0";
     document.getElementById('appVersionLabel').innerText = `v${APP_VERSION}`;
 
     const WORKER_URL = "https://noaa-wave-proxy.rwnster.workers.dev";
