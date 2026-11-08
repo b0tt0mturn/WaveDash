@@ -27,6 +27,11 @@
   push" points, not on every edit.
 
   Changelog (brief — full history in claude/CHANGELOG.md, same project):
+    v2.5.0 (2026-11-08) — Surf session log. Rate the frame on screen 1–5
+      with an optional note; each log saves a snapshot of that frame's
+      swells, wind, tide, spectrum and settings (localStorage). Session
+      list with Show frame and Delete, plus JSON and CSV export for
+      comparing ratings against conditions when refining the algorithm.
     v2.4.0 (2026-10-14) — Usage tracking via Cloudflare Web Analytics
       (free, cookieless, no consent banner). Loads only on the published
       site, never from a local file or localhost. Open the site with
@@ -783,7 +788,7 @@
     // Bumped only at explicit "ready to push" points, not on every edit — see
     // the CHANGELOG project doc for what's shipped under each version and
     // what's still queued under Unreleased.
-    const APP_VERSION = "2.4.0";
+    const APP_VERSION = "2.5.0";
     document.getElementById('appVersionLabel').innerText = `v${APP_VERSION}`;
 
     const WORKER_URL = "https://noaa-wave-proxy.rwnster.workers.dev";
