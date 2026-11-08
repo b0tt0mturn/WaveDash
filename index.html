@@ -469,6 +469,88 @@
       cursor: pointer;
     }
 
+    /* Surf session log (see the SURF SESSION LOG section in the script). */
+    .session-log-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 8px;
+    }
+    .session-log-title { font-weight: bold; font-size: 13px; color: #333; }
+    .session-log-count { font-size: 11px; color: #6c757d; }
+    .session-rating-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 6px;
+    }
+    .session-rating-label { font-size: 12px; font-weight: bold; margin-right: 4px; }
+    .session-rating-btn {
+      flex: 1;
+      padding: 8px 0;
+      border: 1px solid #ced4da;
+      border-radius: 4px;
+      background: #e9ecef;
+      font-weight: bold;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .session-rating-btn.selected {
+      background: #007bff;
+      color: #fff;
+      border-color: #0056b3;
+    }
+    .session-note {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 6px 8px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+    .session-list {
+      margin-top: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 360px;
+      overflow-y: auto;
+    }
+    .session-item {
+      border: 1px solid #e9ecef;
+      border-radius: 6px;
+      padding: 8px 10px;
+      background: #f8f9fa;
+      font-size: 12px;
+    }
+    .session-item-top { display: flex; align-items: center; gap: 8px; }
+    .session-item-rating {
+      min-width: 22px;
+      text-align: center;
+      padding: 2px 6px;
+      border-radius: 10px;
+      background: #007bff;
+      color: #fff;
+      font-weight: bold;
+    }
+    .session-item-time { font-weight: bold; flex: 1; }
+    .session-item-stations { font-size: 11px; color: #6c757d; }
+    .session-item-summary { color: #555; margin-top: 4px; font-size: 11px; }
+    .session-item-note { margin-top: 3px; font-style: italic; color: #333; }
+    .session-item-actions { display: flex; gap: 6px; margin-top: 6px; }
+    .session-item-actions button {
+      font-size: 11px;
+      padding: 4px 8px;
+      cursor: pointer;
+      border: 1px solid #ced4da;
+      border-radius: 4px;
+      background: #fff;
+    }
+    .session-export-row { display: flex; gap: 8px; margin-top: 12px; }
+    .session-export-row .btn { margin-top: 0; flex: 1; }
+    .session-empty { font-size: 12px; color: #8a97a3; font-style: italic; }
+
     @media (min-width: 768px) {
       body { padding: 15px; }
       h2 { font-size: 1.5rem; text-align: left; }
@@ -658,6 +740,34 @@
           <label><input type="checkbox" id="showTide" onchange="onShowTideToggle()"> Show Tide</label>
         </div>
         <div id="heatmapPlot" class="plot-box full-width"></div>
+      </div>
+    </div>
+
+    <!-- Surf session log: rate the frame on screen 1-5 and save a snapshot of
+         its conditions. See the SURF SESSION LOG section of the script. -->
+    <div class="panel" id="sessionsPanel">
+      <div class="session-log-header">
+        <span class="session-log-title">Surf Sessions</span>
+        <span id="sessionLogCount" class="session-log-count"></span>
+      </div>
+
+      <div class="session-rating-row" id="sessionRatingRow">
+        <span class="session-rating-label">Rating:</span>
+        <button type="button" class="session-rating-btn" data-rating="1" onclick="setSessionRating(1)">1</button>
+        <button type="button" class="session-rating-btn" data-rating="2" onclick="setSessionRating(2)">2</button>
+        <button type="button" class="session-rating-btn" data-rating="3" onclick="setSessionRating(3)">3</button>
+        <button type="button" class="session-rating-btn" data-rating="4" onclick="setSessionRating(4)">4</button>
+        <button type="button" class="session-rating-btn" data-rating="5" onclick="setSessionRating(5)">5</button>
+      </div>
+      <input type="text" id="sessionNote" class="session-note" placeholder="Note (optional)" maxlength="200">
+      <button class="btn" id="saveSessionBtn" onclick="saveSession()">Log session at <span id="sessionFrameLabel">current frame</span></button>
+      <div id="sessionStatus" class="status-msg"></div>
+
+      <div id="sessionList" class="session-list"></div>
+
+      <div class="session-export-row">
+        <button type="button" class="btn" onclick="exportSessions('json')">Export JSON</button>
+        <button type="button" class="btn" onclick="exportSessions('csv')">Export CSV</button>
       </div>
     </div>
   </div>
@@ -2099,6 +2209,7 @@
       const frame = timeSeriesData[currentFrameIdx];
       const currentTimeStr = frame.timestamp;
       document.getElementById('timestampDisplay').innerText = currentTimeStr;
+      updateSessionFrameLabel(currentTimeStr);
 
       // Stale wave data: warning banner, dimmed swell plots/table, and an age
       // tag in the plot titles. Wind is always this frame's own reading.
@@ -2571,10 +2682,292 @@
     });
 
     /* =====================================================================
+       SURF SESSION LOG
+       Each logged session stores a snapshot of what the dashboard showed for
+       the frame on screen (swells, wind, tide, spectrum, settings), so it can
+       be compared with the rating later even after NDBC's realtime files roll
+       over. Stored in localStorage for now.
+       ===================================================================== */
+    const SESSION_LOG_KEY = 'waveDash.sessions.v1';
+    // Tide trend is judged from the height 30 min either side of the frame.
+    const SESSION_TIDE_TREND_WINDOW_MS = 30 * 60 * 1000;
+    let pendingSessionRating = null;
+
+    function loadSessions() {
+      try {
+        const parsed = JSON.parse(localStorage.getItem(SESSION_LOG_KEY) || '[]');
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (err) {
+        console.warn('Could not read saved sessions:', err);
+        return [];
+      }
+    }
+
+    function storeSessions(list) {
+      try {
+        localStorage.setItem(SESSION_LOG_KEY, JSON.stringify(list));
+        return true;
+      } catch (err) {
+        console.warn('Could not save sessions:', err);
+        return false;
+      }
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, ch => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
+      ));
+    }
+
+    function setSessionStatus(msg) {
+      document.getElementById('sessionStatus').innerText = msg;
+    }
+
+    function updateSessionFrameLabel(frameTimestamp) {
+      const el = document.getElementById('sessionFrameLabel');
+      if (el) el.innerText = frameTimestamp || 'current frame';
+    }
+
+    function setSessionRating(rating) {
+      pendingSessionRating = rating;
+      document.querySelectorAll('.session-rating-btn').forEach(btn => {
+        btn.classList.toggle('selected', Number(btn.dataset.rating) === rating);
+      });
+      setSessionStatus('');
+    }
+
+    // Snapshot of what the dashboard shows for the frame on screen. Uses the
+    // same helpers renderCurrentFrame() uses, so the saved numbers match the
+    // display at the time of logging.
+    function buildSessionSnapshot(rating, note) {
+      const settings = getUserSettings();
+      const frame = timeSeriesData[currentFrameIdx];
+      const r2 = v => Math.round(v * 100) / 100;
+
+      const clusters = analyzeFrame(frame, settings.peakThreshold);
+      const effectiveWind = frame.wind ? calculateEffectiveWind(frame.wind) : null;
+      const landFacingAngle = ((((settings.beachAngle % 360) + 360) % 360) + 180) % 360;
+      const windGrade = frame.wind
+        ? getWindGradeInfo(effectiveWind, frame.wind.fromDir, landFacingAngle, settings.windGradeCutoffs).label
+        : null;
+
+      let tide = null;
+      if (tideData && tideData.length >= 2) {
+        const utcMs = parseETTimestampToUTC(frame.timestamp);
+        const height = interpolateTideHeight(utcMs, tideData);
+        const before = interpolateTideHeight(utcMs - SESSION_TIDE_TREND_WINDOW_MS, tideData);
+        const after = interpolateTideHeight(utcMs + SESSION_TIDE_TREND_WINDOW_MS, tideData);
+        if (height !== null && isFinite(height)) {
+          tide = {
+            heightFt: r2(height),
+            trend: (before === null || after === null) ? null : (after > before ? 'rising' : 'falling'),
+            stationId: resolvedTideStation ? resolvedTideStation.id : null,
+            stationName: resolvedTideStation ? resolvedTideStation.name : null
+          };
+        }
+      }
+
+      return {
+        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+        loggedAt: new Date().toISOString(),
+        rating,
+        note: note || '',
+        frameTimestamp: frame.timestamp,
+        waveTimestamp: frame.waveTimestamp,
+        waveFresh: frame.waveFresh !== false,
+        waveAgeHours: r2(frame.waveAgeMs / HOUR_MS),
+        app: { version: APP_VERSION, windGradeCutoffs: settings.windGradeCutoffs },
+        settings: {
+          waveStation: settings.stationId,
+          windStation: settings.windStationId,
+          beachAngle: settings.beachAngle,
+          critAngle: settings.critAngle,
+          periodLimit: settings.periodLimit,
+          peakThreshold: settings.peakThreshold,
+          surfEnergy: settings.surfEnergy,
+          surfPeriod: settings.surfPeriod
+        },
+        waveHsFt: r2(computeSignificantWaveHeightFt(frame)),
+        swells: clusters.map((c, i) => ({
+          rank: i + 1,
+          heightFt: r2(c.heightFt),
+          periodS: r2(c.period),
+          directionDeg: Math.round(((c.direction % 360) + 360) % 360),
+          faceFt: r2(c.faceFt),
+          energy: r2(c.energy)
+        })),
+        wind: frame.wind ? {
+          speedKts: r2(frame.wind.speedKts),
+          gustKts: r2(frame.wind.gustKts),
+          effectiveKts: r2(effectiveWind),
+          fromDeg: Math.round(frame.wind.fromDir),
+          grade: windGrade
+        } : null,
+        tide,
+        // Full measured spectrum for this frame, so it can be re-analysed later.
+        spectrum: frame.frequencies.map((f, i) => ({
+          periodS: r2(1 / f),
+          energy: Math.round(frame.energy[i] * 1000) / 1000
+        }))
+      };
+    }
+
+    function saveSession() {
+      if (!timeSeriesData.length) {
+        setSessionStatus('Load wave data first (click Update).');
+        return;
+      }
+      if (pendingSessionRating === null) {
+        setSessionStatus('Pick a rating from 1 to 5 first.');
+        return;
+      }
+      const noteEl = document.getElementById('sessionNote');
+      const snapshot = buildSessionSnapshot(pendingSessionRating, noteEl.value.trim());
+      const list = loadSessions();
+      list.push(snapshot);
+      if (!storeSessions(list)) {
+        setSessionStatus('Could not save: browser storage is full or blocked.');
+        return;
+      }
+      setSessionRating(null);
+      noteEl.value = '';
+      renderSessionList();
+      setSessionStatus(`Logged ${snapshot.rating}/5 for ${snapshot.frameTimestamp}.`);
+    }
+
+    // One-line summary of a stored session's conditions, for the list.
+    function summarizeSession(s) {
+      const parts = [];
+      if (s.waveHsFt != null) parts.push(`Hs ${s.waveHsFt.toFixed(1)} ft`);
+      const lead = (s.swells || [])[0];
+      if (lead) parts.push(`lead ${lead.heightFt.toFixed(1)} ft @ ${lead.periodS.toFixed(1)}s ${lead.directionDeg}°`);
+      if (s.wind) {
+        const grade = s.wind.grade ? `${s.wind.grade} ` : '';
+        parts.push(`wind ${grade}${s.wind.effectiveKts.toFixed(1)} kts from ${degreesToCompass(s.wind.fromDeg)}`);
+      }
+      if (s.tide) parts.push(`tide ${s.tide.heightFt.toFixed(1)} ft${s.tide.trend ? ' ' + s.tide.trend : ''}`);
+      if (!s.waveFresh) parts.push(`wave ${s.waveAgeHours}h old`);
+      return parts.join(' · ');
+    }
+
+    function renderSessionList() {
+      const list = loadSessions();
+      const container = document.getElementById('sessionList');
+      document.getElementById('sessionLogCount').innerText = list.length ? `${list.length} logged` : '';
+      if (!list.length) {
+        container.innerHTML = '<div class="session-empty">No sessions logged yet.</div>';
+        return;
+      }
+      // Stored oldest-first; show newest first.
+      container.innerHTML = list.slice().reverse().map(s => `
+        <div class="session-item">
+          <div class="session-item-top">
+            <span class="session-item-rating">${escapeHtml(s.rating)}</span>
+            <span class="session-item-time">${escapeHtml(s.frameTimestamp)}</span>
+            <span class="session-item-stations">${escapeHtml(s.settings?.waveStation || '')}</span>
+          </div>
+          <div class="session-item-summary">${escapeHtml(summarizeSession(s))}</div>
+          ${s.note ? `<div class="session-item-note">${escapeHtml(s.note)}</div>` : ''}
+          <div class="session-item-actions">
+            <button type="button" onclick="showSession('${s.id}')">Show frame</button>
+            <button type="button" onclick="deleteSession('${s.id}')">Delete</button>
+          </div>
+        </div>`).join('');
+    }
+
+    // Jumps the player to the logged frame, if it's inside the loaded range.
+    function showSession(id) {
+      const s = loadSessions().find(x => x.id === id);
+      if (!s) return;
+      const currentStation = getUserSettings().stationId;
+      if (s.settings?.waveStation && s.settings.waveStation !== currentStation) {
+        setSessionStatus(`Logged from station ${s.settings.waveStation}; current station is ${currentStation}.`);
+      }
+      const idx = timeSeriesData.findIndex(f => f.timestamp === s.frameTimestamp);
+      if (idx === -1) {
+        setSessionStatus(`${s.frameTimestamp} isn't in the loaded range. Set End Date and click Update to load it.`);
+        return;
+      }
+      pause();
+      currentFrameIdx = idx;
+      document.getElementById('timeSlider').value = idx;
+      renderCurrentFrame();
+      document.getElementById('timestampDisplay').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    function deleteSession(id) {
+      if (!confirm('Delete this logged session?')) return;
+      storeSessions(loadSessions().filter(s => s.id !== id));
+      renderSessionList();
+    }
+
+    function sessionsToCsv(list) {
+      const cell = v => {
+        if (v === null || v === undefined) return '';
+        const str = String(v);
+        return /[",\n\r]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+      };
+      const header = [
+        'id', 'logged_at', 'rating', 'note', 'frame_timestamp', 'wave_timestamp',
+        'wave_fresh', 'wave_age_h', 'wave_station', 'wind_station', 'beach_angle',
+        'app_version', 'wave_hs_ft'
+      ];
+      for (let i = 1; i <= MAX_SWELL_CLUSTERS; i++) {
+        header.push(`swell${i}_height_ft`, `swell${i}_period_s`, `swell${i}_dir_deg`,
+                    `swell${i}_face_ft`, `swell${i}_energy`);
+      }
+      header.push('wind_speed_kts', 'wind_gust_kts', 'wind_effective_kts', 'wind_from_deg',
+                  'wind_grade', 'tide_ft', 'tide_trend');
+
+      const rows = list.map(s => {
+        const row = [
+          s.id, s.loggedAt, s.rating, s.note, s.frameTimestamp, s.waveTimestamp,
+          s.waveFresh, s.waveAgeHours, s.settings?.waveStation, s.settings?.windStation,
+          s.settings?.beachAngle, s.app?.version, s.waveHsFt
+        ];
+        for (let i = 0; i < MAX_SWELL_CLUSTERS; i++) {
+          const c = (s.swells || [])[i];
+          row.push(c?.heightFt, c?.periodS, c?.directionDeg, c?.faceFt, c?.energy);
+        }
+        row.push(s.wind?.speedKts, s.wind?.gustKts, s.wind?.effectiveKts, s.wind?.fromDeg,
+                 s.wind?.grade, s.tide?.heightFt, s.tide?.trend);
+        return row.map(cell).join(',');
+      });
+      return [header.join(','), ...rows].join('\r\n');
+    }
+
+    // CSV is the flat table for spreadsheets; JSON keeps the full spectrum too.
+    function exportSessions(format) {
+      const list = loadSessions();
+      if (!list.length) {
+        setSessionStatus('Nothing to export yet.');
+        return;
+      }
+      const stamp = new Date().toISOString().slice(0, 10);
+      let blob, filename;
+      if (format === 'csv') {
+        blob = new Blob([sessionsToCsv(list)], { type: 'text/csv' });
+        filename = `wavedash-sessions-${stamp}.csv`;
+      } else {
+        blob = new Blob([JSON.stringify(list, null, 2)], { type: 'application/json' });
+        filename = `wavedash-sessions-${stamp}.json`;
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    /* =====================================================================
        INIT
        ===================================================================== */
     window.onload = () => {
       setDefaultStartDate();
+      renderSessionList();
       fetchAndProcessData();
     };
   </script>
