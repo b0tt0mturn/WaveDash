@@ -474,6 +474,24 @@
       cursor: pointer;
     }
 
+    /* Break location picker (same look as the rating buttons). */
+    .location-row { display: flex; gap: 6px; margin-top: 2px; }
+    .location-btn {
+      flex: 1;
+      padding: 6px 0;
+      border: 1px solid #ced4da;
+      border-radius: 4px;
+      background: #e9ecef;
+      font-weight: bold;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .location-btn.selected {
+      background: #007bff;
+      color: #fff;
+      border-color: #0056b3;
+    }
+
     /* Surf session log (see the SURF SESSION LOG section in the script). */
     .session-log-header {
       display: flex;
@@ -641,18 +659,17 @@
               <input type="number" step="0.05" id="peakThreshold" value="0.1">
             </div>
 
-            <div class="control-group">
-              <label>Beach Angle (°):</label>
-              <input type="number" id="beachAngle" value="120" min="0" max="360">
-              <select id="beachAnglePreset" class="beach-angle-preset" onchange="applyBeachAnglePreset(this.value)">
-                <option value="" selected>Presets…</option>
-                <option value="120">120° LH</option>
-                <option value="205">205° PP</option>
-                <option value="240">240° GM</option>
-                <option value="240">240° Shack at BI</option>
-                <option value="57"> 57° Turtle Hole</option>
-                <option value="106">106° Spit E Side</option>
-              </select>
+            <div class="control-group span-full">
+              <label>Location:</label>
+              <div class="location-row">
+                <button type="button" class="location-btn selected" data-location="LH" onclick="setLocation('LH')">LH</button>
+                <button type="button" class="location-btn" data-location="GM" onclick="setLocation('GM')">GM</button>
+                <button type="button" class="location-btn" data-location="PP" onclick="setLocation('PP')">PP</button>
+                <button type="button" class="location-btn" data-location="CC" onclick="setLocation('CC')">CC</button>
+              </div>
+              <!-- Set by setLocation(); the beach angle used for the plots and the
+                   logged session comes from the chosen location, never typed in. -->
+              <input type="hidden" id="beachAngle" value="120">
             </div>
 
           </div>
@@ -1061,12 +1078,6 @@
       return `${WORKER_URL}?url=${encodeURIComponent(targetUrl)}`;
     }
 
-    // The preset dropdown is just a shortcut into the Beach Angle number field —
-    // the number field stays the single source of truth, so free-text entry still
-    // works exactly as before. Picking a preset fills it in and, if data is already
-    // loaded, re-renders immediately (no need to re-fetch — Beach Angle only affects
-    // the polar plot's background coloring). The select resets to its placeholder
-    // right after so it never looks "stuck" on a preset once the number is hand-edited.
     // Wave Station preset: fills the Station ID and reloads, same as picking
     // the buoy on the map. Resets to "Presets…" so the same one can be re-picked.
     function applyStationPreset(value) {
@@ -1076,13 +1087,31 @@
       fetchAndProcessData();
     }
 
-    function applyBeachAnglePreset(value) {
-      if (!value) return;
-      document.getElementById('beachAngle').value = value;
-      document.getElementById('beachAnglePreset').value = '';
+    // Break locations. Each one sets the beach angle used for the plots (the
+    // offshore/onshore wind grading and the polar background) and is recorded
+    // with every logged session.
+    const LOCATIONS = {
+      LH: { angle: 120 },
+      GM: { angle: 240 },
+      PP: { angle: 205 },
+      CC: { angle: 240 }
+    };
+    let currentLocation = 'LH';
+
+    function setLocation(code) {
+      const loc = LOCATIONS[code];
+      if (!loc) return;
+      currentLocation = code;
+      document.getElementById('beachAngle').value = loc.angle;
+      document.querySelectorAll('.location-btn').forEach(btn => {
+        btn.classList.toggle('selected', btn.dataset.location === code);
+      });
+      const frame = timeSeriesData[currentFrameIdx];
+      updateSessionFrameLabel(frame ? frame.timestamp : null);
       if (timeSeriesData.length) {
         renderCurrentFrame();
       }
+    }
     }
 
     /* =====================================================================
@@ -2739,7 +2768,7 @@
 
     function updateSessionFrameLabel(frameTimestamp) {
       const el = document.getElementById('sessionFrameLabel');
-      if (el) el.innerText = frameTimestamp || 'current frame';
+      if (el) el.innerText = `${frameTimestamp || 'current frame'} · ${currentLocation}`;
     }
 
     function setSessionRating(rating) {
@@ -2787,6 +2816,7 @@
         rating,
         note: note || '',
         synced: false,
+        location: currentLocation,
         frameTimestamp: frame.timestamp,
         waveTimestamp: frame.waveTimestamp,
         waveFresh: frame.waveFresh !== false,
@@ -2847,8 +2877,8 @@
       setSessionRating(null);
       noteEl.value = '';
       renderSessionList();
-      setSessionStatus(`Logged ${snapshot.rating}/5 for ${snapshot.frameTimestamp}.`);
-      syncSessions(false);
+      setSessionStatus(`Logged ${snapshot.rating}/5 at ${snapshot.location} for ${snapshot.frameTimestamp}.`);
+      syncSessions(true);
     }
 
     function getSyncPassphrase(askIfMissing) {
@@ -2959,7 +2989,7 @@
           <div class="session-item-top">
             <span class="session-item-rating">${escapeHtml(s.rating)}</span>
             <span class="session-item-time">${escapeHtml(s.frameTimestamp)}</span>
-            <span class="session-item-stations">${escapeHtml(s.settings?.waveStation || '')}</span>
+            <span class="session-item-stations">${escapeHtml([s.location, s.settings?.waveStation].filter(Boolean).join(' · '))}</span>
           </div>
           <div class="session-item-summary">${escapeHtml(summarizeSession(s))}</div>
           ${s.note ? `<div class="session-item-note">${escapeHtml(s.note)}</div>` : ''}
@@ -3004,7 +3034,7 @@
       };
       const header = [
         'id', 'logged_at', 'rating', 'note', 'frame_timestamp', 'wave_timestamp',
-        'wave_fresh', 'wave_age_h', 'wave_station', 'wind_station', 'beach_angle',
+        'wave_fresh', 'wave_age_h', 'wave_station', 'wind_station', 'location', 'beach_angle',
         'app_version', 'wave_hs_ft'
       ];
       for (let i = 1; i <= MAX_SWELL_CLUSTERS; i++) {
@@ -3018,7 +3048,7 @@
         const row = [
           s.id, s.loggedAt, s.rating, s.note, s.frameTimestamp, s.waveTimestamp,
           s.waveFresh, s.waveAgeHours, s.settings?.waveStation, s.settings?.windStation,
-          s.settings?.beachAngle, s.app?.version, s.waveHsFt
+          s.location, s.settings?.beachAngle, s.app?.version, s.waveHsFt
         ];
         for (let i = 0; i < MAX_SWELL_CLUSTERS; i++) {
           const c = (s.swells || [])[i];
