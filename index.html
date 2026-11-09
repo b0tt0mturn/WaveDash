@@ -483,15 +483,22 @@
     }
     .session-log-title { font-weight: bold; font-size: 13px; color: #333; }
     .session-log-count { font-size: 11px; color: #6c757d; }
+    /* Rating and location rows share one grid template, so their buttons are the
+       same size and line up in columns. New locations wrap onto the next line. */
     .session-rating-row {
-      display: flex;
-      align-items: center;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(52px, 1fr));
       gap: 6px;
-      margin-bottom: 6px;
+      margin-bottom: 8px;
     }
-    .session-rating-label { font-size: 12px; font-weight: bold; margin-right: 4px; }
+    .session-rating-label {
+      grid-column: 1 / -1;
+      font-size: 12px;
+      font-weight: bold;
+      margin-bottom: 2px;
+    }
     .session-rating-btn {
-      flex: 1;
+      min-width: 0;
       padding: 8px 0;
       border: 1px solid #ced4da;
       border-radius: 4px;
