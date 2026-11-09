@@ -474,24 +474,6 @@
       cursor: pointer;
     }
 
-    /* Break location picker (same look as the rating buttons). */
-    .location-row { display: flex; gap: 6px; margin-top: 2px; }
-    .location-btn {
-      flex: 1;
-      padding: 6px 0;
-      border: 1px solid #ced4da;
-      border-radius: 4px;
-      background: #e9ecef;
-      font-weight: bold;
-      font-size: 12px;
-      cursor: pointer;
-    }
-    .location-btn.selected {
-      background: #007bff;
-      color: #fff;
-      border-color: #0056b3;
-    }
-
     /* Surf session log (see the SURF SESSION LOG section in the script). */
     .session-log-header {
       display: flex;
@@ -659,16 +641,16 @@
               <input type="number" step="0.05" id="peakThreshold" value="0.1">
             </div>
 
-            <div class="control-group span-full">
+            <div class="control-group">
               <label>Location:</label>
-              <div class="location-row">
-                <button type="button" class="location-btn selected" data-location="LH" onclick="setLocation('LH')">LH</button>
-                <button type="button" class="location-btn" data-location="GM" onclick="setLocation('GM')">GM</button>
-                <button type="button" class="location-btn" data-location="PP" onclick="setLocation('PP')">PP</button>
-                <button type="button" class="location-btn" data-location="CC" onclick="setLocation('CC')">CC</button>
-              </div>
-              <!-- Set by setLocation(); the beach angle used for the plots and the
-                   logged session comes from the chosen location, never typed in. -->
+              <select id="locationPreset" class="beach-angle-preset" onchange="setLocation(this.value)">
+                <option value="LH" selected>LH</option>
+                <option value="GM">GM</option>
+                <option value="PP">PP</option>
+                <option value="CC">CC</option>
+              </select>
+              <!-- Set by setLocation(); the beach angle used for the plots comes from
+                   the chosen location. -->
               <input type="hidden" id="beachAngle" value="120">
             </div>
 
@@ -780,6 +762,13 @@
         <button type="button" class="session-rating-btn" data-rating="3" onclick="setSessionRating(3)">3</button>
         <button type="button" class="session-rating-btn" data-rating="4" onclick="setSessionRating(4)">4</button>
         <button type="button" class="session-rating-btn" data-rating="5" onclick="setSessionRating(5)">5</button>
+      </div>
+      <div class="session-rating-row" id="sessionLocationRow">
+        <span class="session-rating-label">Location:</span>
+        <button type="button" class="session-rating-btn" data-session-location="LH" onclick="setSessionLocation('LH')">LH</button>
+        <button type="button" class="session-rating-btn" data-session-location="GM" onclick="setSessionLocation('GM')">GM</button>
+        <button type="button" class="session-rating-btn" data-session-location="PP" onclick="setSessionLocation('PP')">PP</button>
+        <button type="button" class="session-rating-btn" data-session-location="CC" onclick="setSessionLocation('CC')">CC</button>
       </div>
       <input type="text" id="sessionNote" class="session-note" placeholder="Note (optional)" maxlength="200">
       <button class="btn" id="saveSessionBtn" onclick="saveSession()">Log session at <span id="sessionFrameLabel">current frame</span></button>
@@ -1096,21 +1085,27 @@
       PP: { angle: 205 },
       CC: { angle: 240 }
     };
-    let currentLocation = 'LH';
 
+    // Viewing location: sets the beach angle used for the plots. This is not the
+    // logged location; that is picked in the session log (setSessionLocation).
     function setLocation(code) {
       const loc = LOCATIONS[code];
       if (!loc) return;
-      currentLocation = code;
       document.getElementById('beachAngle').value = loc.angle;
-      document.querySelectorAll('.location-btn').forEach(btn => {
-        btn.classList.toggle('selected', btn.dataset.location === code);
-      });
-      const frame = timeSeriesData[currentFrameIdx];
-      updateSessionFrameLabel(frame ? frame.timestamp : null);
       if (timeSeriesData.length) {
         renderCurrentFrame();
       }
+    }
+
+    // Location of the session being logged. Must be picked each time, like the rating.
+    let pendingSessionLocation = null;
+
+    function setSessionLocation(code) {
+      pendingSessionLocation = code;
+      document.querySelectorAll('[data-session-location]').forEach(btn => {
+        btn.classList.toggle('selected', btn.dataset.sessionLocation === code);
+      });
+      if (code) setSessionStatus('');
     }
 
     /* =====================================================================
@@ -2767,7 +2762,7 @@
 
     function updateSessionFrameLabel(frameTimestamp) {
       const el = document.getElementById('sessionFrameLabel');
-      if (el) el.innerText = `${frameTimestamp || 'current frame'} · ${currentLocation}`;
+      if (el) el.innerText = frameTimestamp || 'current frame';
     }
 
     function setSessionRating(rating) {
@@ -2781,7 +2776,7 @@
     // Snapshot of what the dashboard shows for the frame on screen. Uses the
     // same helpers renderCurrentFrame() uses, so the saved numbers match the
     // display at the time of logging.
-    function buildSessionSnapshot(rating, note) {
+    function buildSessionSnapshot(rating, note, location) {
       const settings = getUserSettings();
       const frame = timeSeriesData[currentFrameIdx];
       const r2 = v => Math.round(v * 100) / 100;
@@ -2815,7 +2810,7 @@
         rating,
         note: note || '',
         synced: false,
-        location: currentLocation,
+        location,
         frameTimestamp: frame.timestamp,
         waveTimestamp: frame.waveTimestamp,
         waveFresh: frame.waveFresh !== false,
@@ -2861,12 +2856,16 @@
         setSessionStatus('Load wave data first (click Update).');
         return;
       }
+      if (pendingSessionLocation === null) {
+        setSessionStatus('Pick a location first.');
+        return;
+      }
       if (pendingSessionRating === null) {
         setSessionStatus('Pick a rating from 1 to 5 first.');
         return;
       }
       const noteEl = document.getElementById('sessionNote');
-      const snapshot = buildSessionSnapshot(pendingSessionRating, noteEl.value.trim());
+      const snapshot = buildSessionSnapshot(pendingSessionRating, noteEl.value.trim(), pendingSessionLocation);
       const list = loadSessions();
       list.push(snapshot);
       if (!storeSessions(list)) {
@@ -2874,6 +2873,7 @@
         return;
       }
       setSessionRating(null);
+      setSessionLocation(null);
       noteEl.value = '';
       renderSessionList();
       setSessionStatus(`Logged ${snapshot.rating}/5 at ${snapshot.location} for ${snapshot.frameTimestamp}.`);
