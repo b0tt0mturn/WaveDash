@@ -27,6 +27,18 @@
   push" points, not on every edit.
 
   Changelog (brief — full history in claude/CHANGELOG.md, same project):
+    v2.6.0 (2026-11-09) — Session sync and energy scale. Logged sessions
+      now sync to the data branch of this repo through the Cloudflare
+      Worker (worker/worker.js), with a passphrase and a Sync now button;
+      unsynced sessions are kept locally until confirmed. Each session
+      records a break location (LH/GM/PP/CC) chosen from buttons that sit
+      below the rating. Location is also a dropdown in settings, replacing
+      Beach Angle, and sets the plot's beach angle. Axis Limit becomes Max
+      Energy (default 7 m²/Hz): the energy plot's y-axis and the heatmap
+      color scale top out there, with higher values clipped to it. Swell
+      bubbles are filled with the heatmap color for their energy. Heatmap
+      hour labels are reduced on phones. The Worker's NOAA proxy now only
+      fetches from the NOAA hosts the app uses.
     v2.5.0 (2026-11-08) — Surf session log. Rate the frame on screen 1–5
       with an optional note; each log saves a snapshot of that frame's
       swells, wind, tide, spectrum and settings (localStorage). Session
@@ -803,7 +815,7 @@
     // Bumped only at explicit "ready to push" points, not on every edit — see
     // the CHANGELOG project doc for what's shipped under each version and
     // what's still queued under Unreleased.
-    const APP_VERSION = "2.5.0";
+    const APP_VERSION = "2.6.0";
     document.getElementById('appVersionLabel').innerText = `v${APP_VERSION}`;
 
     const WORKER_URL = "https://noaa-wave-proxy.rwnster.workers.dev";
