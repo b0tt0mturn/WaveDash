@@ -770,6 +770,8 @@
 
       <div id="sessionList" class="session-list"></div>
 
+      <button type="button" class="btn" id="syncSessionsBtn" onclick="syncSessions(true)">Sync now</button>
+
       <div class="session-export-row">
         <button type="button" class="btn" onclick="exportSessions('json')">Export JSON</button>
         <button type="button" class="btn" onclick="exportSessions('csv')">Export CSV</button>
@@ -2698,6 +2700,13 @@
     const SESSION_TIDE_TREND_WINDOW_MS = 30 * 60 * 1000;
     let pendingSessionRating = null;
 
+    // Sync to the GitHub data branch via the Worker (see worker/worker.js).
+    // The passphrase is typed once and kept in this browser's localStorage.
+    const SESSION_SYNC_URL = 'https://noaa-wave-proxy.rwnster.workers.dev/sessions';
+    const SESSION_SYNC_KEY_STORAGE = 'waveDash.sessionKey';
+    const SESSION_SYNC_BATCH = 50;
+    let sessionSyncInFlight = false;
+
     function loadSessions() {
       try {
         const parsed = JSON.parse(localStorage.getItem(SESSION_LOG_KEY) || '[]');
@@ -2777,6 +2786,7 @@
         loggedAt: new Date().toISOString(),
         rating,
         note: note || '',
+        synced: false,
         frameTimestamp: frame.timestamp,
         waveTimestamp: frame.waveTimestamp,
         waveFresh: frame.waveFresh !== false,
@@ -2838,6 +2848,83 @@
       noteEl.value = '';
       renderSessionList();
       setSessionStatus(`Logged ${snapshot.rating}/5 for ${snapshot.frameTimestamp}.`);
+      syncSessions(false);
+    }
+
+    function getSyncPassphrase(askIfMissing) {
+      let key = localStorage.getItem(SESSION_SYNC_KEY_STORAGE);
+      if (!key && askIfMissing) {
+        const entered = prompt('Enter the passphrase for syncing surf sessions:');
+        if (entered && entered.trim()) {
+          key = entered.trim();
+          localStorage.setItem(SESSION_SYNC_KEY_STORAGE, key);
+        }
+      }
+      return key || null;
+    }
+
+    // Local-only bookkeeping fields are not sent to the server.
+    function stripSyncFields(session) {
+      const { synced, syncedAt, ...rest } = session;
+      return rest;
+    }
+
+    // Sends every unsynced session to the Worker in batches. Sessions stay in
+    // localStorage either way; only the 'synced' flag changes once the Worker
+    // has committed them. askIfMissing = true prompts for the passphrase.
+    async function syncSessions(askIfMissing) {
+      if (sessionSyncInFlight) return;
+      const pending = loadSessions().filter(s => !s.synced);
+      if (!pending.length) {
+        setSessionStatus('All sessions are synced.');
+        return;
+      }
+      const key = getSyncPassphrase(askIfMissing);
+      if (!key) {
+        setSessionStatus(`${pending.length} session(s) not synced yet. Press Sync now to enter the passphrase.`);
+        return;
+      }
+
+      sessionSyncInFlight = true;
+      setSessionStatus(`Syncing ${pending.length} session(s)…`);
+      let syncedCount = 0;
+      try {
+        for (let i = 0; i < pending.length; i += SESSION_SYNC_BATCH) {
+          const batch = pending.slice(i, i + SESSION_SYNC_BATCH);
+          const res = await fetch(SESSION_SYNC_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key, sessions: batch.map(stripSyncFields) })
+          });
+          if (res.status === 401) {
+            localStorage.removeItem(SESSION_SYNC_KEY_STORAGE);
+            setSessionStatus('Passphrase rejected. Press Sync now to re-enter it.');
+            return;
+          }
+          if (!res.ok) {
+            const detail = (await res.text()).slice(0, 120);
+            setSessionStatus(`Sync failed (${res.status}): ${detail}`);
+            return;
+          }
+          const ids = new Set(batch.map(s => s.id));
+          const stored = loadSessions();
+          const now = new Date().toISOString();
+          stored.forEach(s => {
+            if (ids.has(s.id)) {
+              s.synced = true;
+              s.syncedAt = now;
+            }
+          });
+          storeSessions(stored);
+          syncedCount += batch.length;
+        }
+        setSessionStatus(`Synced ${syncedCount} session(s).`);
+      } catch (err) {
+        setSessionStatus(`Sync failed (${err.message}). Will retry next time.`);
+      } finally {
+        sessionSyncInFlight = false;
+        renderSessionList();
+      }
     }
 
     // One-line summary of a stored session's conditions, for the list.
@@ -2858,7 +2945,10 @@
     function renderSessionList() {
       const list = loadSessions();
       const container = document.getElementById('sessionList');
-      document.getElementById('sessionLogCount').innerText = list.length ? `${list.length} logged` : '';
+      const notSynced = list.filter(s => !s.synced).length;
+      document.getElementById('sessionLogCount').innerText = list.length
+        ? `${list.length} logged${notSynced ? ` · ${notSynced} not synced` : ''}`
+        : '';
       if (!list.length) {
         container.innerHTML = '<div class="session-empty">No sessions logged yet.</div>';
         return;
@@ -2973,6 +3063,7 @@
     window.onload = () => {
       setDefaultStartDate();
       renderSessionList();
+      syncSessions(false);
       fetchAndProcessData();
     };
   </script>
