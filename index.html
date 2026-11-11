@@ -393,7 +393,7 @@
     }
     .swell-table th, .swell-table td {
       box-sizing: border-box;
-      padding: 6px 6px;
+      padding: 4px 6px;
       text-align: right;
       white-space: nowrap;
     }
@@ -431,9 +431,10 @@
        in the "#" column. */
     .swell-rank-cell {
       display: flex;
-      flex-direction: column;
+      flex-direction: row;
       align-items: center;
-      gap: 3px;
+      justify-content: center;
+      gap: 4px;
       font-size: 11px;
     }
     /* Placeholder rows (see renderSwellTable) — the table always renders
@@ -733,12 +734,12 @@
             <div id="swellTableContainer" class="swell-table-container">
               <table class="swell-table">
                 <colgroup>
-                  <col style="width:28px">
+                  <col style="width:40px">
                   <col style="width:56px">
                   <col style="width:50px">
                   <col style="width:58px">
                   <col style="width:52px">
-                  <col style="width:68px">
+                  <col style="width:56px">
                 </colgroup>
                 <thead>
                   <tr>
@@ -2382,7 +2383,8 @@
           hoverinfo: 'none',
           marker: {
             size: 5,
-            color: clusters.map(c => energyColor(c.energy, maxEnergy)),
+            color: '#ffffff',
+            line: { color: '#1a1a1a', width: 1 },
             opacity: waveStale ? 0.4 : 1
           }
         },
