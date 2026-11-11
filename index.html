@@ -27,6 +27,14 @@
   push" points, not on every edit.
 
   Changelog (brief — full history in claude/CHANGELOG.md, same project):
+    v2.7.0 (2026-11-11) — Plot and layout polish. Plots no longer drag,
+      zoom or rescale, so scrolling past them can't resize them (the station
+      map keeps its zoom). Defaults: Max Energy 6 m²/Hz, Hours to Plot 48.
+      Plot titles drop the date and time, since the scrubber shows it. The
+      polar title shows the surf quality (GOOD, FAIR, POOR) in the wind-arrow
+      color. The swell table is shorter, with each rank bubble beside its
+      number. Polar center dots are white with a dark outline. The heatmap
+      color legend spans the plot height.
     v2.6.0 (2026-11-09) — Session sync and energy scale. Logged sessions
       now sync to the data branch of this repo through the Cloudflare
       Worker (worker/worker.js), with a passphrase and a Sync now button;
@@ -816,7 +824,7 @@
     // Bumped only at explicit "ready to push" points, not on every edit — see
     // the CHANGELOG project doc for what's shipped under each version and
     // what's still queued under Unreleased.
-    const APP_VERSION = "2.6.0";
+    const APP_VERSION = "2.7.0";
     document.getElementById('appVersionLabel').innerText = `v${APP_VERSION}`;
 
     const WORKER_URL = "https://noaa-wave-proxy.rwnster.workers.dev";
