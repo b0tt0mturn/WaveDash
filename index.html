@@ -627,7 +627,7 @@
 
             <div class="control-group">
               <label>Hours to Plot:</label>
-              <input type="number" id="hoursToPlot" value="24" min="1" max="24">
+              <input type="number" id="hoursToPlot" value="48" min="1" max="48">
             </div>
 
             <div class="control-group">
@@ -637,7 +637,7 @@
 
             <div class="control-group">
               <label>Max Energy (m²/Hz):</label>
-              <input type="number" step="0.1" id="maxEnergy" value="7" min="0.1">
+              <input type="number" step="0.1" id="maxEnergy" value="6" min="0.1">
             </div>
 
             <div class="control-group">
@@ -882,7 +882,7 @@
 
     const DEFAULTS = {
       periodLimit: 18,
-      maxEnergy: 7,
+      maxEnergy: 6,
       surfEnergy: 1.0,
       surfPeriod: 9,
       beachAngle: 135
@@ -937,9 +937,23 @@
       [1.0, '#FFFF80']
     ];
 
+    // Plots stay put: axes can't be dragged, zoomed or rescaled, so scrolling
+    // past a chart never resizes it. Hover and tap popups still work.
+    function lockPlotLayout(layout) {
+      for (const key of Object.keys(layout)) {
+        if (/^(x|y)axis\d*$/.test(key)) layout[key].fixedrange = true;
+      }
+      if (layout.polar) {
+        layout.polar.radialaxis = { ...layout.polar.radialaxis, fixedrange: true };
+        layout.polar.angularaxis = { ...layout.polar.angularaxis, fixedrange: true };
+      }
+      return layout;
+    }
+
     const plotlyConfig = {
       displayModeBar: false,
       scrollZoom: false,
+      doubleClick: false,
       responsive: true
     };
 
@@ -1944,7 +1958,7 @@
         }]
       };
 
-      Plotly.newPlot(el, data, layout, plotlyConfig);
+      Plotly.newPlot(el, data, lockPlotLayout(layout), plotlyConfig);
     }
 
     // Lets the toggle take effect immediately without requiring a full Update —
@@ -2475,9 +2489,14 @@
         });
       }
 
+      // Surf quality (the wind grade) in caps, in the same color as the wind arrow.
+      const surfQualityTitleTag = windGradeInfo
+        ? ` — <b style="color:${windGradeInfo.color}">${windGradeInfo.label.toUpperCase()}</b>`
+        : '';
+
       const polarLayout = {
         title: {
-          text: `Peak Swells & Wind (Polar) — <span style="font-size:11px;color:#555">${currentTimeStr}</span>${staleTitleTag}`,
+          text: `Peak Swells & Wind (Polar)${surfQualityTitleTag}${staleTitleTag}`,
           font: { size: 13 }
         },
         bargap: 0,
@@ -2503,7 +2522,7 @@
         autosize: true
       };
 
-      Plotly.newPlot('polarPlot', polarData, polarLayout, plotlyConfig);
+      Plotly.newPlot('polarPlot', polarData, lockPlotLayout(polarLayout), plotlyConfig);
 
       const spectralData = [
         {
@@ -2547,7 +2566,7 @@
       }));
 
       const spectralLayout = {
-        title: { text: `Energy Density vs Period — <span style="font-size:11px;color:#555">${currentTimeStr}</span>${staleTitleTag}`, font: { size: 13 } },
+        title: { text: `Energy Density vs Period${staleTitleTag}`, font: { size: 13 } },
         xaxis: { title: 'Period (s)', range: [0, periodLimit] },
         yaxis: { title: 'Energy (m²/Hz)', range: [0, maxEnergy] },
         margin: { t: 40, b: 40, l: 40, r: 20 },
@@ -2573,7 +2592,7 @@
         autosize: true
       };
 
-      Plotly.newPlot('spectralPlot', spectralData, spectralLayout, plotlyConfig);
+      Plotly.newPlot('spectralPlot', spectralData, lockPlotLayout(spectralLayout), plotlyConfig);
 
       renderHeatmap({ maxEnergy, periodLimit, surfPeriod, currentTimeStr });
     }
@@ -2625,7 +2644,7 @@
         : '';
 
       const heatmapLayout = {
-        title: { text: `Spectral Density Heatmap Over Time — <span style="font-size:11px;color:#555">Active Frame: ${currentTimeStr}</span>${tideTitleNote}`, font: { size: 13 } },
+        title: { text: `Spectral Density Heatmap Over Time${tideTitleNote}`, font: { size: 13 } },
         xaxis: {
           title: 'Hour (EDT/EST)',
           type: 'category',
@@ -2651,7 +2670,7 @@
         ]
       };
 
-      Plotly.newPlot('heatmapPlot', heatmapData, heatmapLayout, plotlyConfig);
+      Plotly.newPlot('heatmapPlot', heatmapData, lockPlotLayout(heatmapLayout), plotlyConfig);
     }
 
     /* =====================================================================
